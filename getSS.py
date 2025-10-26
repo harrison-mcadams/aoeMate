@@ -1,5 +1,6 @@
 from mss import mss
 from PIL import Image
+from pathlib import Path
 
 def capture_gfn_screen_region(bbox):
     """
@@ -23,11 +24,12 @@ def capture_gfn_screen_region(bbox):
         # Convert the raw pixels to a PIL Image
         img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
 
-        output_path = '/Users/harrisonmcadams/Desktop/'
-        output_filename = output_path + "debug_screenshot.png"
+        # Determine an output path based on the current user's home directory.
+        # Prefer the Desktop folder if it exists, otherwise fall back to the home directory.
+        home = Path.home()
+        desktop = home / "Desktop"
+        output_dir = desktop if desktop.exists() else home
+
+        output_filename = str(output_dir / "debug_screenshot.png")
         img.save(output_filename)
         return img
-
-
-
-
