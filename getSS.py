@@ -33,3 +33,18 @@ def capture_gfn_screen_region(bbox):
         output_filename = str(output_dir / "debug_screenshot.png")
         img.save(output_filename)
         return img
+
+
+if __name__ == "__main__":
+    # Basic self-check when executed as a script: capture a demo region and save it.
+    demo_bbox = {'top': 100, 'left': 100, 'width': 400, 'height': 300}
+    try:
+        img = capture_gfn_screen_region(demo_bbox)
+        home = Path.home()
+        desktop = home / "Desktop"
+        out_dir = desktop if desktop.exists() else home
+        out_path = out_dir / "debug_screenshot_test.png"
+        img.save(out_path)
+        print(f"Capture succeeded — saved test image to: {out_path}")
+    except Exception as e:
+        print("Capture failed:", e)
