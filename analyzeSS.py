@@ -102,18 +102,6 @@ def isTargetInSS(res: np.ndarray, target: Image.Image = None, *, out_path: Optio
 
     return len(peaks) > 0
 
-
-def areVillsProducing(ss: Image.Image, kernel_path: str = '/Users/harrisonmcadams/Desktop/villager_icon.png') -> bool:
-    """Convenience wrapper: run convolution and peak detection for the villager icon."""
-    try:
-        villKernel = Image.open(kernel_path)
-    except Exception as e:
-        raise RuntimeError(f"Failed to open kernel at {kernel_path}: {e}")
-
-    res = convolveSSbyKernel(ss, villKernel)
-    return isTargetInSS(res, villKernel)
-
-
 if __name__ == "__main__":
     from PIL import Image
     # Basic self-check when executed as a script: convolve a demo screenshot with a demo kernel.

@@ -21,14 +21,37 @@ if __name__ == "__main__":
     # Can be overridden by environment variable AOEMATE_POLL_MS.
     poll_ms = int(os.environ.get('AOEMATE_POLL_MS', '100'))
 
-    # Determine centered window size safely. Avoid importing GUI toolkits that
-    # may initialize Cocoa/AppKit on macOS (they can raise Objective-C exceptions
-    # in some environments). Allow overriding via environment variables.
+    # Determine centered window size using a best-effort screen query.
+    # Try multiple safe methods in order: pyautogui, macOS osascript, env vars, defaults.
+    screen_w = screen_h = None
+    # 1) pyautogui if available
     try:
-        screen_w = int(os.environ.get('AOEMATE_SCREEN_W', '1280'))
-        screen_h = int(os.environ.get('AOEMATE_SCREEN_H', '800'))
+        import pyautogui
+        sw, sh = pyautogui.size()
+        screen_w, screen_h = int(sw), int(sh)
     except Exception:
-        screen_w, screen_h = 1280, 800
+        pass
+
+    # 2) On macOS, try osascript to ask Finder for desktop bounds (safe subprocess call)
+    if (screen_w is None or screen_h is None) and (os.sys.platform == 'darwin'):
+        try:
+            import subprocess, shlex
+            out = subprocess.check_output(['osascript', '-e', 'tell application "Finder" to get bounds of window of desktop'], text=True)
+            # out is like: '0, 0, 1440, 900'
+            parts = [int(p.strip()) for p in out.strip().split(',')]
+            if len(parts) >= 4:
+                screen_w = parts[2]
+                screen_h = parts[3]
+        except Exception:
+            pass
+
+    # 3) environment variables
+    if (screen_w is None or screen_h is None):
+        try:
+            screen_w = int(os.environ.get('AOEMATE_SCREEN_W', '1280'))
+            screen_h = int(os.environ.get('AOEMATE_SCREEN_H', '800'))
+        except Exception:
+            screen_w, screen_h = 1280, 800
 
     win_w = int(int(os.environ.get('AOEMATE_WIN_W', str(int(screen_w * 0.5)))))
     win_h = int(int(os.environ.get('AOEMATE_WIN_H', str(int(screen_h * 0.5)))))
