@@ -45,12 +45,13 @@ if __name__ == "__main__":
             # get screenshot
             screenshot = getSS.capture_gfn_screen_region(gfn_region)
 
-            out_path = '/Users/harrisonmcadams/Desktop/'
+            #out_path = '/Users/harrisonmcadams/Desktop/'
+            out_path = None  # disable saving debug images
 
             # Run the convolution / detection pipeline
             try:
-                convolved_image = analyzeSS.convolveSSbyKernel(screenshot, vill_kernel)
-                binary = analyzeSS.isTargetInSS(convolved_image, vill_kernel)
+                convolved_image = analyzeSS.convolveSSbyKernel(screenshot, vill_kernel, out_path=out_path)
+                binary = analyzeSS.isTargetInSS(convolved_image, vill_kernel, out_path=out_path)
             except Exception as e:
                 print('Analysis error:', e)
                 binary = False

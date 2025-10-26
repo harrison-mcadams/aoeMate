@@ -1,8 +1,9 @@
 import cv2, numpy as np
 from PIL import Image
 import os
+from typing import Optional
 
-def convolveSSbyKernel(ss: Image.Image, kernel: Image.Image, out_path=None):
+def convolveSSbyKernel(ss: Image.Image, kernel: Image.Image, *, out_path: Optional[str] = None):
     ss_gray = np.array(ss.convert('L'), dtype=np.float32)
     k_gray = np.array(kernel.convert('L'), dtype=np.float32)
 
@@ -24,7 +25,7 @@ def convolveSSbyKernel(ss: Image.Image, kernel: Image.Image, out_path=None):
     return res  # float32 map with values ~[-1,1]
 
 
-def isTargetInSS(res: np.ndarray, target: Image.Image = None, out_path: str = None, *, threshold: float = 0.8, min_distance: int = 10) -> bool:
+def isTargetInSS(res: np.ndarray, target: Image.Image = None, *, out_path: Optional[str] = None, threshold: float = 0.8, min_distance: int = 10) -> bool:
     """Detect peaks in the matchTemplate result `res`.
 
     Uses a simple local-maximum test by dilating the response map with a
@@ -71,7 +72,11 @@ def isTargetInSS(res: np.ndarray, target: Image.Image = None, out_path: str = No
         try:
             os.makedirs(out_path, exist_ok=True)
             # heatmap viz
-            viz = ((res_f - res_f.min()) / (res_f.max() - res_f.min()) * 255).astype(np.uint8)
+            # guard against zero range
+            rmin = float(res_f.min())
+            rmax = float(res_f.max())
+            denom = (rmax - rmin) if (rmax - rmin) != 0 else 1e-8
+            viz = ((res_f - rmin) / denom * 255.0).astype(np.uint8)
             # convert to color for drawing
             viz_color = cv2.applyColorMap(viz, cv2.COLORMAP_JET)
             for (x, y, score) in peaks:
