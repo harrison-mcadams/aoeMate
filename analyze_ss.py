@@ -1,18 +1,18 @@
 """
-analyzeSS.py
+analyze_ss.py
 
 Utilities for simple template-matching based image analysis.
 
 This module exposes two small, focused functions used by the live monitor:
 
-- convolveSSbyKernel(ss, kernel, *, out_path=None)
+- convolve_ssXkernel(ss, kernel, *, out_path=None)
     Run OpenCV's matchTemplate (normalized cross-correlation) between a
     screenshot `ss` (PIL Image) and a `kernel` (PIL Image). Returns the
     float32 response map (values typically in [-1, 1] for TM_CCOEFF_NORMED).
     If `out_path` is provided (a directory path), a visualization file
     `convolved.png` will be written there.
 
-- isTargetInSS(res, target=None, *, out_path=None, threshold=0.8, min_distance=10)
+- is_target_in_ss(res, target=None, *, out_path=None, threshold=0.8, min_distance=10)
     Given the response map `res` produced by matchTemplate, finds local
     peaks above `threshold`. Enforces a minimum distance between peaks
     by dilating the response map. Returns True if >=1 peak is found.
@@ -32,7 +32,7 @@ import os
 from typing import Optional
 
 
-def convolveSSbyKernel(ss: Image.Image, kernel: Image.Image, *, out_path: Optional[str] = None):
+def convolve_ssXkernel(ss: Image.Image, kernel: Image.Image, *, out_path: Optional[str] = None):
     """Run normalized template matching and optionally save a visualization.
 
     Inputs:
@@ -67,7 +67,7 @@ def convolveSSbyKernel(ss: Image.Image, kernel: Image.Image, *, out_path: Option
     return res  # float32 map with values typically in [-1, 1]
 
 
-def isTargetInSS(res: np.ndarray, target: Image.Image = None, *, out_path: Optional[str] = None, threshold: float = 0.8, min_distance: int = 10) -> bool:
+def is_target_in_ss(res: np.ndarray, target: Image.Image = None, *, out_path: Optional[str] = None, threshold: float = 0.8, min_distance: int = 10) -> bool:
     """Detect peaks in a matchTemplate response map.
 
     Strategy:
@@ -162,8 +162,8 @@ if __name__ == "__main__":
         demo_ss = Image.open("/Users/harrisonmcadams/Desktop/debug_screenshot_q.png")
         demo_kernel = Image.open("/Users/harrisonmcadams/Desktop/debug_target.png")
         out_path = '/Users/harrisonmcadams/Desktop/'
-        convolved_image = convolveSSbyKernel(demo_ss, demo_kernel, out_path=out_path)
-        binary = isTargetInSS(convolved_image, demo_kernel, out_path=out_path)
+        convolved_image = convolve_ssXkernel(demo_ss, demo_kernel, out_path=out_path)
+        binary = is_target_in_ss(convolved_image, demo_kernel, out_path=out_path)
         if binary:
             print('Villagers are producing!')
         else:

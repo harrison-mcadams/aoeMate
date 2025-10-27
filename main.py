@@ -13,8 +13,8 @@ Behavior is: load the kernel image once, then loop: capture -> analyze -> show s
 Press 'q' or Esc in the status window to exit the loop cleanly.
 """
 
-import getSS
-import analyzeSS
+import get_ss
+import analyze_ss
 from PIL import Image
 import cv2
 import numpy as np
@@ -24,12 +24,12 @@ import os
 # warn if no villages are being made.
 
 
-def areVillsProducing():
+def are_vills_producing():
     """Run the live monitoring loop until the user quits.
 
     This function performs the following steps (repeat until quit):
       1. Capture a small screen region using `getSS.capture_gfn_screen_region`.
-      2. Run `analyzeSS.convolveSSbyKernel` and `analyzeSS.isTargetInSS` to
+      2. Run `analyzeSS.convolve_ssXkernel` and `analyzeSS.is_target_in_ss` to
          decide whether the target (villager icon) is present.
       3. Update a large centered OpenCV window with a green (detected) or red
          (not detected) full-screen panel and a text label.
@@ -103,7 +103,7 @@ def areVillsProducing():
             gfn_region = {'top': 850, 'left': 0, 'width': 300, 'height': 350}
 
             # Capture the region. We do not save to disk here (out_path=None) by default.
-            screenshot = getSS.capture_gfn_screen_region(gfn_region)
+            screenshot = get_ss.capture_gfn_screen_region(gfn_region)
 
             # Disable debug saving during normal operation; set to a directory string
             # to enable debug outputs (heatmaps, histograms, etc.).
@@ -111,8 +111,8 @@ def areVillsProducing():
 
             # Analysis step: compute matchTemplate response and detect peaks.
             try:
-                convolved_image = analyzeSS.convolveSSbyKernel(screenshot, vill_kernel, out_path=out_path)
-                binary = analyzeSS.isTargetInSS(convolved_image, vill_kernel, out_path=out_path)
+                convolved_image = analyze_ss.convolve_ssXkernel(screenshot, vill_kernel, out_path=out_path)
+                binary = analyze_ss.is_target_in_ss(convolved_image, vill_kernel, out_path=out_path)
             except Exception as e:
                 # Analysis errors should not crash the loop; report and continue.
                 print('Analysis error:', e)
@@ -166,4 +166,4 @@ def areVillsProducing():
 
 if __name__ == "__main__":
 
-    areVillsProducing()
+    are_vills_producing()

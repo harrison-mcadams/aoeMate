@@ -10,7 +10,7 @@ Quick overview
 --------------
 - `getSS.py` - capture a region of the screen and return a PIL Image (optionally save to disk).
 - `analyzeSS.py` - analysis helper functions (template matching using OpenCV's matchTemplate, peak detection, optional debug visualizations).
-- `areVillsProducing.py` / `main.py` - interactive monitoring loops that repeatedly capture a region and display a large green/red status window to indicate detection.
+- `are_vills_producing.py` / `main.py` - interactive monitoring loops that repeatedly capture a region and display a large green/red status window to indicate detection.
 
 Goals of this repository
 ------------------------
@@ -54,8 +54,8 @@ Debugging and examples
 API notes for developers
 ------------------------
 - `getSS.capture_gfn_screen_region(bbox, *, out_path: Optional[str] = None) -> PIL.Image` : captures and returns an image, saves to `out_path` only if provided.
-- `analyzeSS.convolveSSbyKernel(ss, kernel, *, out_path: Optional[str] = None)` : returns the matchTemplate response map; saves a visualization if `out_path` is provided.
-- `analyzeSS.isTargetInSS(res, target=None, *, out_path: Optional[str] = None, threshold=0.8, min_distance=10)` : returns True if peaks are detected in response map; optionally saves heatmap/histogram to `out_path`.
+- `analyzeSS.convolve_ssXkernel(ss, kernel, *, out_path: Optional[str] = None)` : returns the matchTemplate response map; saves a visualization if `out_path` is provided.
+- `analyzeSS.is_target_in_ss(res, target=None, *, out_path: Optional[str] = None, threshold=0.8, min_distance=10)` : returns True if peaks are detected in response map; optionally saves heatmap/histogram to `out_path`.
 
 Troubleshooting notes
 ---------------------
