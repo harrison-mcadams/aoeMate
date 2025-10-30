@@ -100,10 +100,10 @@ def are_vills_producing():
         while True:
             ii += 1
             # Region to capture. Tweak this bbox for your screen layout.
-            gfn_region = {'top': 850, 'left': 0, 'width': 300, 'height': 350}
+            eco_summary = get_ss.get_bbox('eco_summary')
 
             # Capture the region. We do not save to disk here (out_path=None) by default.
-            screenshot = get_ss.capture_gfn_screen_region(gfn_region)
+            screenshot = get_ss.capture_gfn_screen_region(eco_summary)
 
             # Disable debug saving during normal operation; set to a directory string
             # to enable debug outputs (heatmaps, histograms, etc.).
@@ -163,7 +163,48 @@ def are_vills_producing():
         # Ensure the OpenCV window is destroyed on exit so the OS cleans up resources.
         cv2.destroyAllWindows()
 
+def summarize_eco():
+    eco_summary = get_ss.get_bbox('eco_summary')
+    screenshot = get_ss.capture_gfn_screen_region(eco_summary)
+
+    out_path = None
+    out_path = '/Users/harrisonmcadams/Desktop/eco_summary_debug/'
+    kernelPath = '/Users/harrisonmcadams/Desktop/'
+
+    # Get gold
+    gold_kernel = Image.open(kernelPath + 'gold_icon.png')
+
+
+    convolved_image = analyze_ss.convolve_ssXkernel(screenshot, gold_kernel, out_path=out_path)
+    # Directly request peaks and unpack the returned (found, peaks) tuple.
+    binary, peaks = analyze_ss.is_target_in_ss(convolved_image, gold_kernel, out_path=out_path, return_peaks=True)
+    # Print detected peaks for debugging/inspection (x, y, score)
+    if peaks:
+        print('Detected peaks (x,y,score):')
+        for p in peaks:
+            print(' -', p)
+
+    # use the location of the peak to define a box around the icon to feed into get_ss
+    eco_summary_bbox = get_ss.get_bbox('eco_summary')
+
+    fudge_factor = 2
+    height = gold_kernel.size[1]
+    width = gold_kernel.size[0]
+
+    top = eco_summary_bbox['top'] + peaks[0][1]
+    left = eco_summary_bbox['left'] + peaks[0][0]
+
+    gold_bbox = {'top': top - fudge_factor, 'left': left, 'width': width, 'height': height + fudge_factor*2}
+
+    count_width = 100  # adjust as needed
+    gold_count_bbox = {'top': top - fudge_factor, 'left': left + width, 'width': count_width, 'height': height + fudge_factor*2}
+    gold_ss = get_ss.capture_gfn_screen_region(gold_count_bbox, out_path=out_path)
+
+
+
 
 if __name__ == "__main__":
 
-    are_vills_producing()
+    #are_vills_producing()
+
+    summarize_eco()

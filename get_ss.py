@@ -3,6 +3,22 @@ from PIL import Image
 from pathlib import Path
 from typing import Optional
 
+def get_bbox(behavior):
+    """
+    Returns a bounding box dictionary for the given behavior.
+    Args:
+        behavior (str): The behavior name. Supported: 'gfn_menu', 'gfn_in_game'.
+    Returns:
+        dict: A dictionary with keys 'top', 'left', 'width', 'height'.
+    Raises:
+        ValueError: If the behavior is not recognized.
+    """
+    if behavior == 'eco_summary':
+        return {'top': 850, 'left': 0, 'width': 300, 'height': 350}
+    elif behavior == 'gfn_in_game':
+        return {'top': 850, 'left': 0, 'width': 300, 'height': 350}
+    else:
+        raise ValueError(f"Unrecognized behavior: {behavior}")
 
 def capture_gfn_screen_region(bbox, *, out_path: Optional[str] = None):
     """
@@ -32,7 +48,7 @@ def capture_gfn_screen_region(bbox, *, out_path: Optional[str] = None):
         # If an output path was provided, save the image there; otherwise do not write
         if out_path:
             try:
-                out_p = Path(out_path)
+                out_p = Path(out_path+'ss.png')
                 out_p.parent.mkdir(parents=True, exist_ok=True)
                 img.save(str(out_p))
             except Exception as e:

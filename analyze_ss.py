@@ -29,7 +29,7 @@ Notes:
 import cv2, numpy as np
 from PIL import Image
 import os
-from typing import Optional
+from typing import Optional, List, Tuple, Union
 
 
 def convolve_ssXkernel(ss: Image.Image, kernel: Image.Image, *, out_path: Optional[str] = None):
@@ -67,7 +67,7 @@ def convolve_ssXkernel(ss: Image.Image, kernel: Image.Image, *, out_path: Option
     return res  # float32 map with values typically in [-1, 1]
 
 
-def is_target_in_ss(res: np.ndarray, target: Image.Image = None, *, out_path: Optional[str] = None, threshold: float = 0.8, min_distance: int = 10) -> bool:
+def is_target_in_ss(res: np.ndarray, target: Image.Image = None, *, out_path: Optional[str] = None, threshold: float = 0.8, min_distance: int = 10, return_peaks: bool = False) -> Union[bool, Tuple[bool, List[Tuple[int,int,float]]]]:
     """Detect peaks in a matchTemplate response map.
 
     Strategy:
@@ -85,7 +85,11 @@ def is_target_in_ss(res: np.ndarray, target: Image.Image = None, *, out_path: Op
       - min_distance: int minimum spacing (in pixels) between reported peaks
 
     Returns:
-      - True if at least one peak meeting the criteria is found, else False.
+      - By default (return_peaks=False): a boolean (True if at least one peak
+        meeting the criteria is found, else False) — this preserves backward
+        compatibility with existing callers.
+      - If return_peaks=True: returns a tuple (found, peaks) where `found` is a
+        boolean and `peaks` is a list of (x, y, score) tuples for each detected peak.
     """
     if res is None:
         return False
@@ -151,8 +155,12 @@ def is_target_in_ss(res: np.ndarray, target: Image.Image = None, *, out_path: Op
         except Exception:
             pass
 
-    # Return True if any peaks were detected
-    return len(peaks) > 0
+    # If caller requested peaks, return both boolean and peak list; otherwise
+    # return a single boolean to preserve the original function contract.
+    found = len(peaks) > 0
+    if return_peaks:
+        return (found, peaks)
+    return found
 
 
 if __name__ == "__main__":
