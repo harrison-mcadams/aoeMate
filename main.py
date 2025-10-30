@@ -10,10 +10,13 @@ This file focuses on application glue: region selection, invoking the
 analyzer, and presenting a simple UI. All image-analysis specifics live in
 `analyze_ss.py` and capture logic lives in `get_ss.py`.
 
-Notes:
-- All file-write/debugging is optional and controlled by `out_path` values.
-- The coordinates used throughout are in pixel units with (0,0) at the
-  top-left of the primary monitor; OpenCV uses (x, y) == (col, row).
+Notes (important developer conventions):
+- Coordinates throughout this code are in pixels with origin (0,0) at the
+  top-left of the primary monitor. OpenCV and numpy arrays use (row, col)
+  ordering internally but when presenting coordinates to humans we use
+  (x, y) == (col, row) for clarity.
+- All debug file-writing is optional and controlled by `out_path` values.
+  Keep `out_path=None` during normal runs to avoid disk I/O.
 """
 
 import get_ss  # screen-capture helper (captures named bboxes from config)
@@ -27,18 +30,28 @@ import os  # environment variables and path helpers
 # Live monitor loop
 # --------------------------------------------------------------------------------
 
+
 def are_vills_producing():
     """Run the live monitoring loop until the user quits.
 
-    This repeatedly captures the `eco_summary` region, runs the icon detector,
-    and presents a large green/red status window. The function is intentionally
-    tolerant of errors (it logs and continues) so it can run unattended.
+    Steps per iteration:
+      1. Capture a named screen region (via `get_ss.get_bbox`) -> PIL.Image
+      2. Run template matching using `analyze_ss` -> match response map
+      3. Detect peaks in the response map (boolean decision for live loop)
+      4. Update a large centered color panel: GREEN when detected, RED when not
+      5. Poll for 'q' or ESC to exit
+
+    This function is explicitly fault tolerant: any exception raised during
+    analysis is printed and the loop continues. This keeps the monitor up
+    if occasional frames fail to capture or analyze.
     """
 
     # Load the villager icon template once to avoid repeatedly reading disk.
+    # Keep this small and immutable so performance stays good.
     vill_kernel = Image.open("/Users/harrisonmcadams/Desktop/villager_icon.png")
 
     # Create an OpenCV window; we'll resize and move it to center it on screen.
+    # The window is only used for display and to capture key events (cv2.waitKey).
     cv2.namedWindow('AOEMate', cv2.WINDOW_NORMAL)
     cv2.resizeWindow('AOEMate', 200, 100)
 
@@ -111,7 +124,8 @@ def are_vills_producing():
 
             try:
                 # Compute the template-matching response map. The analyzer returns
-                # a 2D numpy array of match scores (float32).
+                # a 2D numpy array of match scores (float32). High values are better
+                # matches (TM_CCOEFF_NORMED is typically in [-1,1]).
                 convolved_image = analyze_ss.convolve_ssXkernel(screenshot, vill_kernel, out_path=out_path)
 
                 # Decide whether the target exists; is_target_in_ss supports
@@ -176,6 +190,7 @@ def are_vills_producing():
 # --------------------------------------------------------------------------------
 # Region-specific summaries (one-shot helpers used in debugging / demos)
 # --------------------------------------------------------------------------------
+
 
 def summarize_eco():
     """Extract economic (eco) UI components from the `eco_summary` region.
