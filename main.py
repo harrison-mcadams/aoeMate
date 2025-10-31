@@ -10,13 +10,18 @@ This file focuses on application glue: region selection, invoking the
 analyzer, and presenting a simple UI. All image-analysis specifics live in
 `analyze_ss.py` and capture logic lives in `get_ss.py`.
 
-Notes (important developer conventions):
-- Coordinates throughout this code are in pixels with origin (0,0) at the
-  top-left of the primary monitor. OpenCV and numpy arrays use (row, col)
-  ordering internally but when presenting coordinates to humans we use
-  (x, y) == (col, row) for clarity.
-- All debug file-writing is optional and controlled by `out_path` values.
-  Keep `out_path=None` during normal runs to avoid disk I/O.
+Developer notes (quick):
+- To tune detection, edit parameters inside `analyze_ss.py` (thresholds, min_distance)
+  or change the template images placed on the Desktop (villager_icon.png, gold_icon.png).
+- Keep `out_path=None` during normal runs to avoid writing debug images. Enable a path
+  when you want visual debugging artifacts written to disk.
+
+Coordinate conventions:
+- BBoxes in `get_ss` and this file use a dict: {'top', 'left', 'width', 'height'}
+  where top/left are pixel offsets from the PRIMARY monitor's top-left.
+- Template matcher `is_target_in_ss` returns peaks as (x, y, score) where x is
+  horizontal offset (columns) and y is vertical offset (rows) relative to the
+  input image to the matcher (not absolute screen coords).
 """
 
 import get_ss  # screen-capture helper (captures named bboxes from config)
@@ -46,33 +51,36 @@ def are_vills_producing():
     if occasional frames fail to capture or analyze.
     """
 
-    # Load the villager icon template once to avoid repeatedly reading disk.
-    # Keep this small and immutable so performance stays good.
+    # ------------------------------------------------------------------
+    # Configuration / assets
+    # ------------------------------------------------------------------
+    # The kernel (template) file path is currently hard-coded to the Desktop.
+    # Replace this with your own path or wire it to a config if you move files.
     vill_kernel = Image.open("/Users/harrisonmcadams/Desktop/villager_icon.png")
 
     # Create an OpenCV window; we'll resize and move it to center it on screen.
-    # The window is only used for display and to capture key events (cv2.waitKey).
+    # The window is also used to capture keyboard events via cv2.waitKey.
     cv2.namedWindow('AOEMate', cv2.WINDOW_NORMAL)
     cv2.resizeWindow('AOEMate', 200, 100)
 
-    # Poll interval (ms) — controls how long cv2.waitKey blocks each loop.
-    # Larger values reduce CPU usage but make reaction to changes slower.
+    # Poll interval (ms) controls how often the loop yields to the GUI event
+    # system. Larger values reduce CPU usage at the cost of responsiveness.
     poll_ms = int(os.environ.get('AOEMATE_POLL_MS', '100'))
 
-    # Determine screen geometry. We try several safe strategies and fall back
-    # to environment-provided sizes or defaults. The detected `screen_w` and
-    # `screen_h` are used only to center the status window.
+    # ------------------------------------------------------------------
+    # Compute window placement (try a few safe methods, avoid heavy GUI libs)
+    # ------------------------------------------------------------------
     screen_w = screen_h = None
     try:
+        # pyautogui is convenient but optional; we try it first when available.
         import pyautogui
         sw, sh = pyautogui.size()
         screen_w, screen_h = int(sw), int(sh)
     except Exception:
-        # pyautogui may not be installed — we'll try other fallbacks below.
+        # Not installed or failed — we'll fall back below.
         pass
 
-    # macOS-specific fallback: use osascript to query Finder for desktop bounds
-    # (safe subprocess call; avoids importing GUI frameworks that might crash).
+    # macOS: try osascript via subprocess to avoid Tk/Cocoa initialization.
     if (screen_w is None or screen_h is None) and (os.sys.platform == 'darwin'):
         try:
             import subprocess
@@ -86,7 +94,7 @@ def are_vills_producing():
         except Exception:
             pass
 
-    # final fallback: environment variables or sensible defaults
+    # Final fallback: environment variables (useful in multi-monitor or CI setups)
     if (screen_w is None or screen_h is None):
         try:
             screen_w = int(os.environ.get('AOEMATE_SCREEN_W', '1280'))
@@ -100,60 +108,61 @@ def are_vills_producing():
     win_x = int(os.environ.get('AOEMATE_WIN_X', str((screen_w - win_w) // 2)))
     win_y = int(os.environ.get('AOEMATE_WIN_Y', str((screen_h - win_h) // 2)))
 
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
     try:
         ii = 0
         while True:
             ii += 1
 
             # -------------------------------
-            # Capture
+            # Capture stage
             # -------------------------------
-            # `eco_summary` is a logical region name mapped in get_ss.get_bbox
-            # (region definitions live in the get_ss module or its config).
+            # get_ss.get_bbox returns a dict with keys: top,left,width,height
             eco_summary = get_ss.get_bbox('eco_summary')
 
-            # Capture the region (returns a PIL.Image). We do not save the
-            # image by default; saving is controlled with `out_path` below.
+            # capture_gfn_screen_region returns a PIL Image (RGB). By default the
+            # capture helper will NOT write a file unless `out_path` is provided.
             screenshot = get_ss.capture_gfn_screen_region(eco_summary)
 
             # -------------------------------
-            # Analyze
+            # Analyze stage
             # -------------------------------
-            # Keep debug output off during normal operation (no files written).
+            # Keep debug output off during normal operation (set `out_path` to a
+            # directory path to enable diagnostic files: heatmap, peaks, histogram)
             out_path = None
 
             try:
-                # Compute the template-matching response map. The analyzer returns
-                # a 2D numpy array of match scores (float32). High values are better
-                # matches (TM_CCOEFF_NORMED is typically in [-1,1]).
+                # convolve_ssXkernel returns a 2D numpy array (float32) of match
+                # scores; higher is better for TM_CCOEFF_NORMED.
                 convolved_image = analyze_ss.convolve_ssXkernel(screenshot, vill_kernel, out_path=out_path)
 
-                # Decide whether the target exists; is_target_in_ss supports
-                # returning peaks if requested. The simplest usage returns a
-                # boolean. Here we call the boolean form for the live loop.
+                # The simplest API usage: return boolean true/false for detection.
+                # If you need coordinates use return_peaks=True in is_target_in_ss.
                 binary = analyze_ss.is_target_in_ss(convolved_image, vill_kernel, out_path=out_path)
 
             except Exception as e:
-                # Non-fatal: log and continue the loop so the monitor stays up.
+                # Analysis must be fault tolerant — log errors and continue.
                 print('Analysis error:', e)
                 binary = False
 
-            # Console status (helps when running detached from the screen)
+            # -------------------------------
+            # Reporting / Display
+            # -------------------------------
+            # Console status (useful when running headless or via SSH)
             if binary:
                 print('Villagers are producing!')
             else:
                 print('Villagers are NOT producing! :-(')
 
-            # -------------------------------
-            # Display status panel (large centered window)
-            # -------------------------------
+            # Visual status panel: full color background + centered label
             try:
-                # Single solid color background (BGR ordering for OpenCV)
-                color = (0, 255, 0) if binary else (0, 0, 255)
+                color = (0, 255, 0) if binary else (0, 0, 255)  # BGR
                 status = np.full((win_h, win_w, 3), color, dtype=np.uint8)
 
-                # Put a readable label centered in the panel. Scale is relative
-                # to the window size so the label is legible on different displays.
+                # Draw text roughly centered. We compute size once per frame;
+                # for higher performance you could precompute font scale thresholds.
                 label = 'Producing' if binary else 'Not producing'
                 font = cv2.FONT_HERSHEY_SIMPLEX
                 base_scale = max(1.0, min(win_w, win_h) / 400.0)
@@ -163,14 +172,12 @@ def are_vills_producing():
                 ty = max(30, (win_h + th) // 2)
                 cv2.putText(status, label, (tx, ty), font, base_scale * 2.0, (255, 255, 255), thickness, cv2.LINE_AA)
 
-                # Show and position the window centered on the screen
+                # Present the window and position it centered on the screen
                 cv2.imshow('AOEMate', status)
                 cv2.resizeWindow('AOEMate', win_w, win_h)
                 cv2.moveWindow('AOEMate', win_x, win_y)
             except Exception:
-                # If display fails (for example in headless CI), still poll keys
-                # by showing a small blank window so the process can shut down
-                # cleanly when requested.
+                # If we can't display (headless), keep a tiny window so waitKey works
                 blank = 255 * np.ones((200, 300, 3), dtype='uint8')
                 cv2.imshow('AOEMate', blank)
 
@@ -183,7 +190,7 @@ def are_vills_producing():
     except KeyboardInterrupt:
         print('Interrupted by user')
     finally:
-        # Clean up the OpenCV window on exit to free OS resources
+        # Ensure OpenCV window is closed so the OS can reclaim resources
         cv2.destroyAllWindows()
 
 
@@ -222,10 +229,14 @@ def summarize_eco():
     out_path = None
     out_path = '/Users/harrisonmcadams/Desktop/eco_summary_debug/'
 
-    # Template path / kernel location
+    # Template path / kernel location (Desktop by convention for this project)
     kernelPath = '/Users/harrisonmcadams/Desktop/'
 
     # --- locate gold icon inside eco_summary ---
+    # Note: the kernel images are expected to be small (e.g. 32x32 or 48x48)
+    # and should match the on-screen icon scale. If detection fails, try
+    # providing a higher-resolution kernel or rescaling the screenshot before
+    # matching.
     gold_kernel = Image.open(kernelPath + 'gold_icon.png')
 
     # Run the matcher and request peaks (coordinates + scores). The
@@ -255,7 +266,7 @@ def summarize_eco():
     eco_summary_bbox = get_ss.get_bbox('eco_summary')
 
     # Tuning values used to expand from icon center to final capture boxes
-    fudge_factor = 2  # small padding in pixels around boxes
+    fudge_factor = 10  # small padding in pixels around boxes
     height = gold_kernel.size[1]
     width = gold_kernel.size[0]
 
@@ -279,6 +290,9 @@ def summarize_eco():
     # Build a bbox for the numeric count which typically appears to the right
     # of the icon. The left coordinate is offset by the icon width plus a small
     # gap. `count_width` must be tuned to accommodate the font & number of digits.
+    # NOTE: count_width is a heuristic. If your UI uses larger fonts or more
+    # digits, increase this value. Consider measuring a few examples and
+    # computing an adaptive width based on font size instead of a constant.
     count_width = 100  # adjust wider/narrower depending on font/spacing
     gold_count_bbox = {
         'top': int(top - fudge_factor),
@@ -287,8 +301,47 @@ def summarize_eco():
         'height': int(height + fudge_factor * 2)
     }
 
+    # gold_ss is the cropped image containing the numeric count. The image
+    # returned is a PIL.Image (RGB). Downstream OCR/parsing routines should
+    # convert to grayscale and optionally apply thresholding before OCR.
     # Capture the numeric-count region (optionally saving to disk for debugging)
-    gold_ss = get_ss.capture_gfn_screen_region(gold_count_bbox, out_path=out_path)
+    gold_box_ss = get_ss.capture_gfn_screen_region(gold_count_bbox, out_path=out_path)
+
+    # Collect digit detections across 0-9, then assemble them left-to-right.
+    all_digit_peaks = []  # list of (x, digit, score)
+    digits_to_check = list(range(10))
+    per_digit_min_distance = 5
+
+    for digit in digits_to_check:
+        try:
+            number_kernel = Image.open(kernelPath + f'{digit}.png')
+        except Exception:
+            # Skip missing digit templates rather than crash
+            continue
+
+        # Match the single-digit kernel inside the cropped number area
+        convolved_image = analyze_ss.convolve_ssXkernel(gold_box_ss, number_kernel, out_path=out_path)
+
+        # Request peaks for this digit
+        found, peaks = analyze_ss.is_target_in_ss(convolved_image, number_kernel, out_path=out_path, return_peaks=True, min_distance=per_digit_min_distance)
+        if not found:
+            continue
+
+        # Each peak is (x, y, score) relative to gold_box_ss; keep x, digit, score
+        for (px, py, pscore) in peaks:
+            all_digit_peaks.append((int(px), int(digit), float(pscore)))
+
+    # If no digit detections, we're done
+    if not all_digit_peaks:
+        print('No digit peaks detected in numeric region')
+    else:
+        # Simple left-to-right assembly: sort detections by x and concatenate
+        # the digit values in that order. We rely on `min_distance` used when
+        # detecting peaks to ensure individual digits are reported separately.
+        all_digit_peaks.sort(key=lambda t: t[0])
+        assembled_digits = [str(int(digit)) for (x, digit, score) in all_digit_peaks]
+        assembled_number = ''.join(assembled_digits)
+        print('Assembled number (left-to-right):', assembled_number)
 
 
 if __name__ == "__main__":
