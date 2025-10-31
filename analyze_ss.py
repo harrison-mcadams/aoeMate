@@ -179,12 +179,18 @@ def is_target_in_ss(res: np.ndarray, target: Image.Image = None, *, out_path: Op
             import matplotlib
             matplotlib.use('Agg')
             import matplotlib.pyplot as plt
-            plt.figure()
-            plt.hist(res_f.ravel(), bins=200)
-            plt.yscale('log')
-            plt.tight_layout()
-            plt.savefig(os.path.join(out_path, 'convolve_hist_log.png'))
-            plt.close()
+            fig = plt.figure()
+            try:
+                ax = fig.add_subplot(1, 1, 1)
+                ax.hist(res_f.ravel(), bins=200)
+                ax.set_yscale('log')
+                fig.tight_layout()
+                fig.savefig(os.path.join(out_path, 'convolve_hist_log.png'))
+            finally:
+                try:
+                    plt.close(fig)
+                except Exception:
+                    pass
         except Exception:
             pass
 

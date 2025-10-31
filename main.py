@@ -1,244 +1,119 @@
-"""
-main.py
+import os
+import time
+import math
+import logging
+from datetime import datetime
+from pathlib import Path
 
-Interactive monitor for detecting a small on-screen icon (villager) using
-template matching. The live loop captures a small screen region, runs a
-matchTemplate pipeline in `analyze_ss`, and displays a large centered
-status panel (green when the target is present, red otherwise).
-
-This file focuses on application glue: region selection, invoking the
-analyzer, and presenting a simple UI. All image-analysis specifics live in
-`analyze_ss.py` and capture logic lives in `get_ss.py`.
-
-Developer notes (quick):
-- To tune detection, edit parameters inside `analyze_ss.py` (thresholds, min_distance)
-  or change the template images placed on the Desktop (villager_icon.png, gold_icon.png).
-- Keep `out_path=None` during normal runs to avoid writing debug images. Enable a path
-  when you want visual debugging artifacts written to disk.
-
-Coordinate conventions:
-- BBoxes in `get_ss` and this file use a dict: {'top', 'left', 'width', 'height'}
-  where top/left are pixel offsets from the PRIMARY monitor's top-left.
-- Template matcher `is_target_in_ss` returns peaks as (x, y, score) where x is
-  horizontal offset (columns) and y is vertical offset (rows) relative to the
-  input image to the matcher (not absolute screen coords).
-"""
-
-import get_ss  # screen-capture helper (captures named bboxes from config)
-import analyze_ss  # analysis helpers (template matching and peak detection)
-from PIL import Image  # image I/O (Pillow)
-import cv2  # OpenCV for visualization and low-level image ops
-import numpy as np  # numerical arrays (used by OpenCV pipelines)
-import os  # environment variables and path helpers
+import get_ss
+import analyze_ss
+from PIL import Image
+import cv2
+import numpy as np
 import concurrent.futures as futures
 
-# --------------------------------------------------------------------------------
-# Live monitor loop
-# --------------------------------------------------------------------------------
+# Configure logging
+log_path = Path(__file__).resolve().parent / 'aoemate.log'
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s: %(message)s',
+    handlers=[
+        logging.FileHandler(str(log_path), mode='a'),
+        logging.StreamHandler()
+    ]
+)
+
+_LIVE_ANIMATION = None
 
 
 def are_vills_producing():
-    """Run the live monitoring loop until the user quits.
+    """Small OpenCV status panel: captures eco_summary and runs villager kernel.
 
-    Steps per iteration:
-      1. Capture a named screen region (via `get_ss.get_bbox`) -> PIL.Image
-      2. Run template matching using `analyze_ss` -> match response map
-      3. Detect peaks in the response map (boolean decision for live loop)
-      4. Update a large centered color panel: GREEN when detected, RED when not
-      5. Poll for 'q' or ESC to exit
-
-    This function is explicitly fault tolerant: any exception raised during
-    analysis is printed and the loop continues. This keeps the monitor up
-    if occasional frames fail to capture or analyze.
+    This keeps the previous small visual status behavior.
     """
+    try:
+        vill_kernel = Image.open("/Users/harrisonmcadams/Desktop/villager_icon.png")
+    except Exception:
+        logging.exception('Could not load villager kernel')
+        vill_kernel = None
 
-    # ------------------------------------------------------------------
-    # Configuration / assets
-    # ------------------------------------------------------------------
-    # The kernel (template) file path is currently hard-coded to the Desktop.
-    # Replace this with your own path or wire it to a config if you move files.
-    vill_kernel = Image.open("/Users/harrisonmcadams/Desktop/villager_icon.png")
-
-    # Create an OpenCV window; we'll resize and move it to center it on screen.
-    # The window is also used to capture keyboard events via cv2.waitKey.
     cv2.namedWindow('AOEMate', cv2.WINDOW_NORMAL)
     cv2.resizeWindow('AOEMate', 200, 100)
 
-    # Poll interval (ms) controls how often the loop yields to the GUI event
-    # system. Larger values reduce CPU usage at the cost of responsiveness.
     poll_ms = int(os.environ.get('AOEMATE_POLL_MS', '100'))
 
-    # ------------------------------------------------------------------
-    # Compute window placement (try a few safe methods, avoid heavy GUI libs)
-    # ------------------------------------------------------------------
-    screen_w = screen_h = None
     try:
-        # pyautogui is convenient but optional; we try it first when available.
         import pyautogui
         sw, sh = pyautogui.size()
         screen_w, screen_h = int(sw), int(sh)
     except Exception:
-        # Not installed or failed — we'll fall back below.
-        pass
+        screen_w = int(os.environ.get('AOEMATE_SCREEN_W', '1280'))
+        screen_h = int(os.environ.get('AOEMATE_SCREEN_H', '800'))
 
-    # macOS: try osascript via subprocess to avoid Tk/Cocoa initialization.
-    if (screen_w is None or screen_h is None) and (os.sys.platform == 'darwin'):
-        try:
-            import subprocess
-            out = subprocess.check_output([
-                'osascript', '-e', 'tell application "Finder" to get bounds of window of desktop'
-            ], text=True)
-            parts = [int(p.strip()) for p in out.strip().split(',')]
-            if len(parts) >= 4:
-                screen_w = parts[2]
-                screen_h = parts[3]
-        except Exception:
-            pass
-
-    # Final fallback: environment variables (useful in multi-monitor or CI setups)
-    if (screen_w is None or screen_h is None):
-        try:
-            screen_w = int(os.environ.get('AOEMATE_SCREEN_W', '1280'))
-            screen_h = int(os.environ.get('AOEMATE_SCREEN_H', '800'))
-        except Exception:
-            screen_w, screen_h = 1280, 800
-
-    # Default window size: 50% of detected/fallback screen size, centered.
     win_w = int(int(os.environ.get('AOEMATE_WIN_W', str(int(screen_w * 0.5)))))
     win_h = int(int(os.environ.get('AOEMATE_WIN_H', str(int(screen_h * 0.5)))))
     win_x = int(os.environ.get('AOEMATE_WIN_X', str((screen_w - win_w) // 2)))
     win_y = int(os.environ.get('AOEMATE_WIN_Y', str((screen_h - win_h) // 2)))
 
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
     try:
-        ii = 0
         while True:
-            ii += 1
-
-            # -------------------------------
-            # Capture stage
-            # -------------------------------
-            # get_ss.get_bbox returns a dict with keys: top,left,width,height
             eco_summary = get_ss.get_bbox('eco_summary')
-
-            # capture_gfn_screen_region returns a PIL Image (RGB). By default the
-            # capture helper will NOT write a file unless `out_path` is provided.
             screenshot = get_ss.capture_gfn_screen_region(eco_summary)
-
-            # -------------------------------
-            # Analyze stage
-            # -------------------------------
-            # Keep debug output off during normal operation (set `out_path` to a
-            # directory path to enable diagnostic files: heatmap, peaks, histogram)
             out_path = None
-
             try:
-                # convolve_ssXkernel returns a 2D numpy array (float32) of match
-                # scores; higher is better for TM_CCOEFF_NORMED.
-                convolved_image = analyze_ss.convolve_ssXkernel(screenshot, vill_kernel, out_path=out_path)
-
-                # The simplest API usage: return boolean true/false for detection.
-                # If you need coordinates use return_peaks=True in is_target_in_ss.
-                binary = analyze_ss.is_target_in_ss(convolved_image, vill_kernel, out_path=out_path)
-
-            except Exception as e:
-                # Analysis must be fault tolerant — log errors and continue.
-                print('Analysis error:', e)
+                if vill_kernel is None:
+                    binary = False
+                else:
+                    conv = analyze_ss.convolve_ssXkernel(screenshot, vill_kernel, out_path=out_path)
+                    binary = analyze_ss.is_target_in_ss(conv, vill_kernel, out_path=out_path)
+            except Exception:
+                logging.exception('Analysis error')
                 binary = False
 
-            # -------------------------------
-            # Reporting / Display
-            # -------------------------------
-            # Console status (useful when running headless or via SSH)
-            if binary:
-                print('Villagers are producing!')
-            else:
-                print('Villagers are NOT producing! :-(')
+            color = (0, 255, 0) if binary else (0, 0, 255)
+            status = np.full((win_h, win_w, 3), color, dtype=np.uint8)
 
-            # Visual status panel: full color background + centered label
+            label = 'Producing' if binary else 'Not producing'
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            base_scale = max(1.0, min(win_w, win_h) / 400.0)
+            thickness = max(2, int(base_scale))
+            (tw, th), _ = cv2.getTextSize(label, font, base_scale * 2.0, thickness)
+            tx = max(10, (win_w - tw) // 2)
+            ty = max(30, (win_h + th) // 2)
+            cv2.putText(status, label, (tx, ty), font, base_scale * 2.0, (255, 255, 255), thickness, cv2.LINE_AA)
+
             try:
-                color = (0, 255, 0) if binary else (0, 0, 255)  # BGR
-                status = np.full((win_h, win_w, 3), color, dtype=np.uint8)
-
-                # Draw text roughly centered. We compute size once per frame;
-                # for higher performance you could precompute font scale thresholds.
-                label = 'Producing' if binary else 'Not producing'
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                base_scale = max(1.0, min(win_w, win_h) / 400.0)
-                thickness = max(2, int(base_scale))
-                (tw, th), _ = cv2.getTextSize(label, font, base_scale * 2.0, thickness)
-                tx = max(10, (win_w - tw) // 2)
-                ty = max(30, (win_h + th) // 2)
-                cv2.putText(status, label, (tx, ty), font, base_scale * 2.0, (255, 255, 255), thickness, cv2.LINE_AA)
-
-                # Present the window and position it centered on the screen
                 cv2.imshow('AOEMate', status)
                 cv2.resizeWindow('AOEMate', win_w, win_h)
                 cv2.moveWindow('AOEMate', win_x, win_y)
             except Exception:
-                # If we can't display (headless), keep a tiny window so waitKey works
                 blank = 255 * np.ones((200, 300, 3), dtype='uint8')
                 cv2.imshow('AOEMate', blank)
 
-            # Poll for key press: 'q' or Esc to quit
             key = cv2.waitKey(poll_ms) & 0xFF
             if key == ord('q') or key == 27:
-                print('Quit key pressed - exiting loop')
+                logging.info('Quit key pressed - exiting')
                 break
 
     except KeyboardInterrupt:
-        print('Interrupted by user')
+        logging.info('Interrupted by user')
     finally:
-        # Ensure OpenCV window is closed so the OS can reclaim resources
         cv2.destroyAllWindows()
 
 
-# --------------------------------------------------------------------------------
-# Region-specific summaries (one-shot helpers used in debugging / demos)
-# --------------------------------------------------------------------------------
-
-
 def summarize_eco():
-    """Extract economic (eco) UI components from the `eco_summary` region.
+    """Capture the eco_summary region and extract resource counts.
 
-    This function demonstrates a small pipeline to:
-      1) capture the `eco_summary` region
-      2) locate the gold icon via template matching (returns peaks)
-      3) build small sub-bounding boxes around the icon and the number field
-      4) capture those sub-regions for downstream OCR or parsing
-
-    Notes about coordinates and peaks:
-      - Peaks returned by `is_target_in_ss(..., return_peaks=True)` are tuples
-        in the form (x, y, score). Coordinates are relative to the top-left of
-        the image that was given to the matcher (here: the captured eco_summary
-        screenshot). To convert a peak into absolute screen coordinates you
-        add the top/left of the original bbox.
+    Returns a dict: {'gold': '100', 'food': '20', 'stone': '0', 'wood': '200'} or None values.
     """
-
-    # Capture the named UI region. `get_ss.get_bbox` returns a dictionary of
-    # the form {'top': ..., 'left': ..., 'width': ..., 'height': ...} which is
-    # relative to the primary monitor. We pass that bbox to the capture helper
-    # which returns a PIL.Image containing just that region.
+    logging.info('summarize_eco: entering')
     eco_summary = get_ss.get_bbox('eco_summary')
+    logging.info('summarize_eco: eco_summary bbox=%s', eco_summary)
     screenshot = get_ss.capture_gfn_screen_region(eco_summary)
 
-    # Debug output directory. When set to a string the analyzer will write
-    # debug artifacts (convolved heatmap, annotated peaks, histograms).
-    # Leave as None during normal operation to avoid disk writes.
     out_path = None
-    out_path = '/Users/harrisonmcadams/Desktop/eco_summary_debug/'
-
-    # Template path / kernel location (Desktop by convention for this project)
     kernelPath = '/Users/harrisonmcadams/Desktop/'
 
-    # The earlier single-resource (gold) detector was removed in favor of the
-    # generalized resource loop below that handles gold/food/stone/wood and
-    # runs detection in parallel. This avoids duplicate work and centralizes
-    # the logic.
-
-    # ...now run the loop over all resources (gold, food, stone, wood)
     resources = [
         ('gold', 'gold_icon.png'),
         ('food', 'food_icon.png'),
@@ -246,20 +121,11 @@ def summarize_eco():
         ('wood', 'wood_icon.png'),
     ]
 
-    # Prepare a results dict to collect assembled values per resource
     results = {}
+    eco_summary_bbox = eco_summary
+    fudge_factor = 10
 
-    # Base region bbox (screen coordinates) for later absolute conversions
-    eco_summary_bbox = get_ss.get_bbox('eco_summary')
-
-    # Tuning values used to expand from icon center to final capture boxes
-    fudge_factor = 10  # small padding in pixels around boxes
-
-    # ===== Performance improvements =====
-    # 1) Load and cache all resource and digit kernels once to avoid repeated
-    #    file I/O inside the loop.
-    # 2) Run per-digit matching in parallel using a ThreadPoolExecutor. OpenCV's
-    #    matchTemplate runs in C and benefits from parallelism across cores.
+    # Load resource kernels and digit kernels
     resource_kernels = {}
     for _, icon_fname in resources:
         try:
@@ -274,61 +140,40 @@ def summarize_eco():
         except Exception:
             digit_kernels[digit] = None
 
-    # Number of worker threads: cap to avoid oversubscription
     max_workers = max(2, min(8, (os.cpu_count() or 4)))
-
-    # Precompute digit kernels as grayscale arrays (cache) to avoid repeated conversions
     digit_kernels_gray = {d: (np.array(k.convert('L'), dtype=np.float32) if k is not None else None) for d, k in digit_kernels.items()}
 
-    # Shared executor for digit-matching tasks
     ex_digits = futures.ThreadPoolExecutor(max_workers=max_workers)
-
-    # Executor for resource-level parallelism (run each resource concurrently)
     ex_resources = futures.ThreadPoolExecutor(max_workers=min(len(resources), max_workers))
 
     def process_resource(res_name: str, icon_fname: str):
-        """Process a single resource: find icon, crop count area, detect digits.
-
-        Returns the assembled number (string) or None on failure.
-        """
-        # Load kernel for this resource
         kernel = resource_kernels.get(icon_fname)
         if kernel is None:
             return None
-
-        # Match the resource icon within the eco_summary screenshot
         res_conv = analyze_ss.convolve_ssXkernel(screenshot, kernel, out_path=out_path)
         found, peaks = analyze_ss.is_target_in_ss(res_conv, kernel, out_path=out_path, return_peaks=True)
         if not found or not peaks:
             return None
-
-        # Use the first detected peak as the canonical icon location (relative to screenshot)
         peak_x, peak_y, peak_score = peaks[0]
         top = eco_summary_bbox['top'] + int(peak_y)
         left = eco_summary_bbox['left'] + int(peak_x)
         icon_w, icon_h = kernel.size
-
-        # Build a bbox to the right of the icon where the numeric count usually appears
-        count_width = 100  # heuristic; adjust if necessary
+        count_width = 100
         count_bbox = {
             'top': int(top - fudge_factor),
             'left': int(left + icon_w + 2),
             'width': int(count_width),
             'height': int(icon_h + fudge_factor * 2)
         }
-
-        # Capture the region containing the numeric count
         try:
             count_img = get_ss.capture_gfn_screen_region(count_bbox, out_path=out_path)
         except Exception:
             return None
-
-        # Precompute grayscale array for the count crop
         count_img_gray = np.array(count_img.convert('L'), dtype=np.float32)
 
-        # Submit per-digit detection tasks to the shared digit executor
         per_digit_min_distance = 5
         futures_digits = []
+
         def detect_digit_worker(dd: int):
             dk = digit_kernels_gray.get(dd)
             if dk is None:
@@ -339,7 +184,6 @@ def summarize_eco():
                 return []
             return [(int(px), int(dd), float(pscore)) for (px, py, pscore) in peaks_d]
 
-        # Submit per-digit jobs to the shared digit executor and collect results
         for d in range(10):
             if digit_kernels_gray.get(d) is None:
                 continue
@@ -352,55 +196,36 @@ def summarize_eco():
                 if res_list:
                     all_digit_peaks.extend(res_list)
             except Exception:
-                # ignore worker failures for robustness
                 continue
 
         if not all_digit_peaks:
             return None
-        # sort left-to-right and assemble
         all_digit_peaks.sort(key=lambda t: t[0])
         assembled = ''.join(str(int(d)) for (_, d, _) in all_digit_peaks)
         return assembled
 
-    # Submit resource tasks and collect results as they complete. Use a try/finally
-    # so that executors are always shut down even if submission or processing fails.
-    # Attempt to submit resource tasks in parallel; if submission fails, fall
-    # back to a sequential loop so callers still get a results dict.
     future_to_res = {}
     try:
-        print(f'Submitting {len(resources)} resource tasks to executor...')
+        logging.info('Submitting %d resource tasks...', len(resources))
         future_to_res = {ex_resources.submit(process_resource, name, fname): (name, fname) for name, fname in resources}
-        print('Submission complete, waiting for results...')
         for fut in futures.as_completed(future_to_res):
             name, _ = future_to_res[fut]
             try:
                 val = fut.result()
-                if val is None:
-                    print(f"{name.title()} icon or digits not found")
-                    results[name] = None
-                else:
-                    print(f"{name.title()}:", val)
-                    results[name] = val
-            except Exception as e:
-                print(f"Error processing resource {name}:", e)
+                results[name] = val
+            except Exception:
+                logging.exception('Error processing resource %s', name)
                 results[name] = None
-    except Exception as e:
-        # If the executor itself failed for some reason, run resources sequentially
-        print('Parallel submission failed, falling back to sequential processing:', e)
+    except Exception:
+        logging.exception('Parallel submission failed; running sequentially')
         for name, fname in resources:
             try:
                 val = process_resource(name, fname)
-                if val is None:
-                    print(f"{name.title()} icon or digits not found")
-                    results[name] = None
-                else:
-                    print(f"{name.title()}:", val)
-                    results[name] = val
-            except Exception as e2:
-                print(f'Error processing resource {name} sequentially:', e2)
+                results[name] = val
+            except Exception:
+                logging.exception('Sequential processing failed for %s', name)
                 results[name] = None
     finally:
-        # Ensure executors are always shut down
         try:
             ex_digits.shutdown(wait=True)
         except Exception:
@@ -412,9 +237,140 @@ def summarize_eco():
 
     return results
 
-if __name__ == "__main__":
-    results = summarize_eco()
-    # Print a concise summary for quick visibility when run as a script
-    print('\nResource summary:')
-    for k, v in (results or {}).items():
-        print(f'  {k}: {v}')
+
+def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
+    """OpenCV-only live monitor: draws stacked resource plots and updates them.
+
+    Press 'q' or ESC in the OpenCV window to quit.
+    """
+    logging.info('live_monitor_resources (OpenCV) start poll_sec=%s max_points=%s', poll_sec, max_points)
+    global _LIVE_ANIMATION
+    if _LIVE_ANIMATION is not None:
+        logging.info('live_monitor_resources: animation already running')
+        return
+
+    resource_names = ['gold', 'food', 'stone', 'wood']
+    times = []
+    data = {r: [] for r in resource_names}
+
+    sw = int(os.environ.get('AOEMATE_SCREEN_W', '1280'))
+    sh = int(os.environ.get('AOEMATE_SCREEN_H', '800'))
+    win_w = int(os.environ.get('AOEMATE_WIN_W', str(min(1000, int(sw * 0.6)))))
+    win_h = int(os.environ.get('AOEMATE_WIN_H', str(min(900, int(sh * 0.6)))))
+
+    cv_win_name = 'AOEMatePlot'
+    try:
+        cv2.namedWindow(cv_win_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(cv_win_name, win_w, win_h)
+    except Exception:
+        pass
+
+    start_time = datetime.now()
+
+    def _append_values(results):
+        now = datetime.now()
+        times.append(now)
+        for r in resource_names:
+            v = None
+            if results and r in results:
+                v = results[r]
+            if v is None:
+                data[r].append(math.nan)
+            else:
+                sval = str(v).replace(',', '').strip()
+                try:
+                    data[r].append(int(sval))
+                except Exception:
+                    try:
+                        data[r].append(float(sval))
+                    except Exception:
+                        data[r].append(math.nan)
+        if len(times) > max_points:
+            del times[:-max_points]
+            for r in resource_names:
+                del data[r][:-max_points]
+
+    def render_frame():
+        canvas = 255 * np.ones((win_h, win_w, 3), dtype=np.uint8)
+        pad = 8
+        plot_h = (win_h - (len(resource_names) + 1) * pad) // len(resource_names)
+        left_margin = 60
+        right_margin = 20
+        for i, r in enumerate(resource_names):
+            top = pad + i * (plot_h + pad)
+            bottom = top + plot_h
+            cv2.rectangle(canvas, (left_margin - 10, top), (win_w - right_margin, bottom), (240, 240, 240), -1)
+            vals = data.get(r, [])
+            n = len(vals)
+            if n >= 2:
+                valid = [v for v in vals if not math.isnan(v)]
+                if valid:
+                    vmin = min(valid)
+                    vmax = max(valid)
+                    vrange = vmax - vmin if vmax != vmin else 1.0
+                else:
+                    vmin, vmax, vrange = 0.0, 1.0, 1.0
+                xs = np.linspace(left_margin, win_w - right_margin, n)
+                pts = []
+                for k, val in enumerate(vals):
+                    if math.isnan(val):
+                        y = bottom - 4
+                    else:
+                        y = int(top + (plot_h - 20) * (1.0 - (val - vmin) / vrange)) + 10
+                    x = int(xs[k])
+                    pts.append((x, y))
+                pts_arr = np.array(pts, dtype=np.int32)
+                cv2.polylines(canvas, [pts_arr], False, (0, 120, 255), 2, lineType=cv2.LINE_AA)
+                for (x, y) in pts:
+                    cv2.circle(canvas, (x, y), 3, (0, 80, 200), -1)
+                cv2.putText(canvas, f'{int(vmax)}', (6, top + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+                cv2.putText(canvas, f'{int(vmin)}', (6, bottom - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+            else:
+                cv2.putText(canvas, 'waiting for data...', (left_margin + 10, top + plot_h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 1, cv2.LINE_AA)
+            cur = data[r][-1] if data[r] else math.nan
+            cur_text = str(int(cur)) if (not math.isnan(cur)) else 'NaN'
+            cv2.putText(canvas, r.title(), (left_margin - 10, top - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (10, 10, 10), 2, cv2.LINE_AA)
+            cv2.putText(canvas, cur_text, (win_w - right_margin - 60, top + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (50, 150, 50), 2, cv2.LINE_AA)
+        elapsed = (datetime.now() - start_time).total_seconds()
+        cv2.putText(canvas, f'Elapsed: {int(elapsed)}s', (10, win_h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (50, 50, 50), 1, cv2.LINE_AA)
+        return canvas
+
+    try:
+        _LIVE_ANIMATION = True
+        frame = 0
+        while _LIVE_ANIMATION:
+            try:
+                results = {}
+                try:
+                    results = summarize_eco()
+                except Exception:
+                    logging.exception('summarize_eco() failed')
+                _append_values(results)
+                canvas = render_frame()
+                try:
+                    cv2.imshow(cv_win_name, canvas)
+                except Exception:
+                    pass
+                k = cv2.waitKey(int(poll_sec * 1000)) & 0xFF
+                if k == ord('q') or k == 27:
+                    logging.info('Quit key pressed - exiting live monitor')
+                    break
+                frame += 1
+            except Exception:
+                logging.exception('Error in OpenCV live loop; exiting')
+                break
+        logging.info('OpenCV live loop ended')
+    finally:
+        try:
+            cv2.destroyWindow(cv_win_name)
+        except Exception:
+            pass
+        _LIVE_ANIMATION = None
+
+
+if __name__ == '__main__':
+    try:
+        poll = float(os.environ.get('AOE_POLL_SEC', '1.0'))
+    except Exception:
+        poll = 1.0
+    live_monitor_resources(poll_sec=poll)
