@@ -410,6 +410,60 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                     cv2.circle(canvas, (x, y), 3, (0, 80, 200), -1)
                 cv2.putText(canvas, f'{int(vmax)}', (6, top + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
                 cv2.putText(canvas, f'{int(vmin)}', (6, bottom - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+                # --- compute and plot resource gather rate (units per minute) on right axis ---
+                # Compute rates between consecutive points (aligned to same xs). rate[i] = (val[i]-val[i-1]) / dt * 60
+                rates = []
+                if len(times) >= 2:
+                    # Build elapsed times corresponding to data points
+                    t_secs = [ (t - times[0]).total_seconds() for t in times[-n:] ] if len(times) >= n else [ (times[i] - times[0]).total_seconds() for i in range(n) ]
+                    # If t_secs length mismatches, fallback to uniform spacing of 1 sec
+                    if len(t_secs) != n:
+                        t_secs = list(range(n))
+                    for i in range(n):
+                        if i == 0:
+                            # Use forward difference for first point
+                            dt = t_secs[1] - t_secs[0] if n > 1 else 1.0
+                            dv = (vals[1] - vals[0]) if n > 1 and not math.isnan(vals[1]) and not math.isnan(vals[0]) else 0.0
+                        else:
+                            dt = t_secs[i] - t_secs[i-1] if (t_secs[i] - t_secs[i-1]) != 0 else 1.0
+                            dv = 0.0 if math.isnan(vals[i]) or math.isnan(vals[i-1]) else (vals[i] - vals[i-1])
+                        if dt == 0:
+                            rate = 0.0
+                        else:
+                            rate = (dv / dt) * 60.0  # units per minute
+                        rates.append(rate)
+                else:
+                    rates = [0.0] * n
+
+                # Determine rate axis scale and map to pixel y positions on right
+                valid_rates = [r for r in rates if not math.isnan(r)]
+                if valid_rates:
+                    rmin = min(valid_rates)
+                    rmax = max(valid_rates)
+                    rrange = rmax - rmin if rmax != rmin else 1.0
+                    # Build points for rate curve
+                    pts_rate = []
+                    for k, rate in enumerate(rates):
+                        if math.isnan(rate):
+                            y_r = bottom - 4
+                        else:
+                            y_r = int(top + (plot_h - 20) * (1.0 - (rate - rmin) / rrange)) + 10
+                        x = int(xs[k])
+                        pts_rate.append((x, y_r))
+                    # Draw dotted rate line: small circles at each sample and a thin polyline
+                    pts_rate_arr = np.array(pts_rate, dtype=np.int32)
+                    # thin semi-transparent line for continuity
+                    try:
+                        cv2.polylines(canvas, [pts_rate_arr], False, (34, 139, 34), 1, lineType=cv2.LINE_AA)
+                    except Exception:
+                        pass
+                    for (xr, yr) in pts_rate:
+                        cv2.circle(canvas, (xr, yr), 2, (34, 139, 34), -1)
+                    # Right axis labels for rate
+                    cv2.putText(canvas, f'{int(rmax)}', (win_w - right_margin - 2, top + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (34, 139, 34), 1, cv2.LINE_AA)
+                    cv2.putText(canvas, f'{int(rmin)}', (win_w - right_margin - 2, bottom - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (34, 139, 34), 1, cv2.LINE_AA)
+                    # small label indicating units
+                    cv2.putText(canvas, '/min', (win_w - right_margin - 40, top + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (34, 139, 34), 1, cv2.LINE_AA)
             else:
                 cv2.putText(canvas, 'waiting for data...', (left_margin + 10, top + plot_h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 1, cv2.LINE_AA)
             cur = data[r][-1] if data[r] else math.nan
