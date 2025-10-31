@@ -30,6 +30,7 @@ from PIL import Image  # image I/O (Pillow)
 import cv2  # OpenCV for visualization and low-level image ops
 import numpy as np  # numerical arrays (used by OpenCV pipelines)
 import os  # environment variables and path helpers
+import concurrent.futures as futures
 
 # --------------------------------------------------------------------------------
 # Live monitor loop
@@ -232,116 +233,10 @@ def summarize_eco():
     # Template path / kernel location (Desktop by convention for this project)
     kernelPath = '/Users/harrisonmcadams/Desktop/'
 
-    # --- locate gold icon inside eco_summary ---
-    # Note: the kernel images are expected to be small (e.g. 32x32 or 48x48)
-    # and should match the on-screen icon scale. If detection fails, try
-    # providing a higher-resolution kernel or rescaling the screenshot before
-    # matching.
-    gold_kernel = Image.open(kernelPath + 'gold_icon.png')
-
-    # Run the matcher and request peaks (coordinates + scores). The
-    # convolved_image is a 2D numpy array where each element corresponds to the
-    # match score at that top-left alignment. Peaks are returned as (x,y,score)
-    # tuples where x is horizontal offset (columns) and y is vertical offset
-    # (rows) within the `screenshot` image.
-    convolved_image = analyze_ss.convolve_ssXkernel(screenshot, gold_kernel, out_path=out_path)
-    binary, peaks = analyze_ss.is_target_in_ss(convolved_image, gold_kernel, out_path=out_path, return_peaks=True)
-
-    # Report peaks for quick inspection. Each `p` is (x, y, score) where x is
-    # horizontal offset (columns) and y is vertical offset (rows) inside the
-    # eco_summary screenshot.
-    if peaks:
-        print('Detected peaks (x,y,score):')
-        for p in peaks:
-            print(' -', p)
-
-    # If we have at least one peak, construct small bboxes around the icon and
-    # around the numeric count that typically sits to the right of the icon.
-    # We use the first detected peak (peaks[0]) as the representative location.
-    if not peaks:
-        # Nothing to do further if we couldn't find an icon
-        return
-
-    # Base region (the eco_summary bbox on the full screen)
-    eco_summary_bbox = get_ss.get_bbox('eco_summary')
-
-    # Tuning values used to expand from icon center to final capture boxes
-    fudge_factor = 10  # small padding in pixels around boxes
-    height = gold_kernel.size[1]
-    width = gold_kernel.size[0]
-
-    # peaks[0] is (x, y, score) relative to the eco_summary image. To convert
-    # to absolute screen coordinates, add the eco_summary's top/left offsets.
-    # Note: x is columns (left-to-right), y is rows (top-to-bottom).
-    peak_x, peak_y, peak_score = peaks[0]
-    top = eco_summary_bbox['top'] + peak_y
-    left = eco_summary_bbox['left'] + peak_x
-
-    # Build the gold icon bbox. We add a small `fudge_factor` padding so the
-    # crop includes a little margin around the icon (helps OCR and prevents
-    # tight cropping when anti-aliasing shifts pixels).
-    gold_bbox = {
-        'top': int(top - fudge_factor),
-        'left': int(left - fudge_factor),
-        'width': int(width + fudge_factor * 2),
-        'height': int(height + fudge_factor * 2)
-    }
-
-    # Build a bbox for the numeric count which typically appears to the right
-    # of the icon. The left coordinate is offset by the icon width plus a small
-    # gap. `count_width` must be tuned to accommodate the font & number of digits.
-    # NOTE: count_width is a heuristic. If your UI uses larger fonts or more
-    # digits, increase this value. Consider measuring a few examples and
-    # computing an adaptive width based on font size instead of a constant.
-    count_width = 100  # adjust wider/narrower depending on font/spacing
-    gold_count_bbox = {
-        'top': int(top - fudge_factor),
-        'left': int(left + width + 2),  # a small gap between icon and number
-        'width': int(count_width),
-        'height': int(height + fudge_factor * 2)
-    }
-
-    # gold_ss is the cropped image containing the numeric count. The image
-    # returned is a PIL.Image (RGB). Downstream OCR/parsing routines should
-    # convert to grayscale and optionally apply thresholding before OCR.
-    # Capture the numeric-count region (optionally saving to disk for debugging)
-    gold_box_ss = get_ss.capture_gfn_screen_region(gold_count_bbox, out_path=out_path)
-
-    # Collect digit detections across 0-9, then assemble them left-to-right.
-    all_digit_peaks = []  # list of (x, digit, score)
-    digits_to_check = list(range(10))
-    per_digit_min_distance = 5
-
-    for digit in digits_to_check:
-        try:
-            number_kernel = Image.open(kernelPath + f'{digit}.png')
-        except Exception:
-            # Skip missing digit templates rather than crash
-            continue
-
-        # Match the single-digit kernel inside the cropped number area
-        convolved_image = analyze_ss.convolve_ssXkernel(gold_box_ss, number_kernel, out_path=out_path)
-
-        # Request peaks for this digit
-        found, peaks = analyze_ss.is_target_in_ss(convolved_image, number_kernel, out_path=out_path, return_peaks=True, min_distance=per_digit_min_distance)
-        if not found:
-            continue
-
-        # Each peak is (x, y, score) relative to gold_box_ss; keep x, digit, score
-        for (px, py, pscore) in peaks:
-            all_digit_peaks.append((int(px), int(digit), float(pscore)))
-
-    # If no digit detections, we're done
-    if not all_digit_peaks:
-        print('No digit peaks detected in numeric region')
-    else:
-        # Simple left-to-right assembly: sort detections by x and concatenate
-        # the digit values in that order. We rely on `min_distance` used when
-        # detecting peaks to ensure individual digits are reported separately.
-        all_digit_peaks.sort(key=lambda t: t[0])
-        assembled_digits = [str(int(digit)) for (x, digit, score) in all_digit_peaks]
-        assembled_number = ''.join(assembled_digits)
-        print('Assembled number (left-to-right):', assembled_number)
+    # The earlier single-resource (gold) detector was removed in favor of the
+    # generalized resource loop below that handles gold/food/stone/wood and
+    # runs detection in parallel. This avoids duplicate work and centralizes
+    # the logic.
 
     # ...now run the loop over all resources (gold, food, stone, wood)
     resources = [
@@ -360,32 +255,57 @@ def summarize_eco():
     # Tuning values used to expand from icon center to final capture boxes
     fudge_factor = 10  # small padding in pixels around boxes
 
-    for res_name, icon_fname in resources:
-        # Load the icon kernel for this resource; skip if missing
+    # ===== Performance improvements =====
+    # 1) Load and cache all resource and digit kernels once to avoid repeated
+    #    file I/O inside the loop.
+    # 2) Run per-digit matching in parallel using a ThreadPoolExecutor. OpenCV's
+    #    matchTemplate runs in C and benefits from parallelism across cores.
+    resource_kernels = {}
+    for _, icon_fname in resources:
         try:
-            kernel = Image.open(kernelPath + icon_fname)
+            resource_kernels[icon_fname] = Image.open(kernelPath + icon_fname)
         except Exception:
-            print(f"Resource kernel missing for {res_name}: {icon_fname}")
-            results[res_name] = None
-            continue
+            resource_kernels[icon_fname] = None
+
+    digit_kernels = {}
+    for digit in range(10):
+        try:
+            digit_kernels[digit] = Image.open(kernelPath + f'{digit}.png')
+        except Exception:
+            digit_kernels[digit] = None
+
+    # Number of worker threads: cap to avoid oversubscription
+    max_workers = max(2, min(8, (os.cpu_count() or 4)))
+
+    # Precompute digit kernels as grayscale arrays (cache) to avoid repeated conversions
+    digit_kernels_gray = {d: (np.array(k.convert('L'), dtype=np.float32) if k is not None else None) for d, k in digit_kernels.items()}
+
+    # Shared executor for digit-matching tasks
+    ex_digits = futures.ThreadPoolExecutor(max_workers=max_workers)
+
+    # Executor for resource-level parallelism (run each resource concurrently)
+    ex_resources = futures.ThreadPoolExecutor(max_workers=min(len(resources), max_workers))
+
+    def process_resource(res_name: str, icon_fname: str):
+        """Process a single resource: find icon, crop count area, detect digits.
+
+        Returns the assembled number (string) or None on failure.
+        """
+        # Load kernel for this resource
+        kernel = resource_kernels.get(icon_fname)
+        if kernel is None:
+            return None
 
         # Match the resource icon within the eco_summary screenshot
         res_conv = analyze_ss.convolve_ssXkernel(screenshot, kernel, out_path=out_path)
         found, peaks = analyze_ss.is_target_in_ss(res_conv, kernel, out_path=out_path, return_peaks=True)
-
         if not found or not peaks:
-            print(f"{res_name.title()} icon not found in eco_summary")
-            results[res_name] = None
-            continue
+            return None
 
         # Use the first detected peak as the canonical icon location (relative to screenshot)
         peak_x, peak_y, peak_score = peaks[0]
-
-        # Compute screen-relative top/left for the icon
         top = eco_summary_bbox['top'] + int(peak_y)
         left = eco_summary_bbox['left'] + int(peak_x)
-
-        # Icon dimensions (px)
         icon_w, icon_h = kernel.size
 
         # Build a bbox to the right of the icon where the numeric count usually appears
@@ -398,37 +318,103 @@ def summarize_eco():
         }
 
         # Capture the region containing the numeric count
-        count_img = get_ss.capture_gfn_screen_region(count_bbox, out_path=out_path)
+        try:
+            count_img = get_ss.capture_gfn_screen_region(count_bbox, out_path=out_path)
+        except Exception:
+            return None
 
-        # Detect digits 0-9 within the captured count image and collect peaks
-        all_digit_peaks = []  # list of (x, digit, score)
+        # Precompute grayscale array for the count crop
+        count_img_gray = np.array(count_img.convert('L'), dtype=np.float32)
+
+        # Submit per-digit detection tasks to the shared digit executor
         per_digit_min_distance = 5
-        for digit in range(10):
-            try:
-                digit_kernel = Image.open(kernelPath + f'{digit}.png')
-            except Exception:
-                continue
-
-            conv = analyze_ss.convolve_ssXkernel(count_img, digit_kernel, out_path=out_path)
-            found_d, peaks_d = analyze_ss.is_target_in_ss(conv, digit_kernel, out_path=out_path, return_peaks=True, min_distance=per_digit_min_distance)
+        futures_digits = []
+        def detect_digit_worker(dd: int):
+            dk = digit_kernels_gray.get(dd)
+            if dk is None:
+                return []
+            conv_local = analyze_ss.match_template_arrays(count_img_gray, dk, out_path=out_path)
+            found_d, peaks_d = analyze_ss.is_target_in_ss(conv_local, None, out_path=out_path, return_peaks=True, min_distance=per_digit_min_distance)
             if not found_d:
+                return []
+            return [(int(px), int(dd), float(pscore)) for (px, py, pscore) in peaks_d]
+
+        # Submit per-digit jobs to the shared digit executor and collect results
+        for d in range(10):
+            if digit_kernels_gray.get(d) is None:
                 continue
-            for (px, py, pscore) in peaks_d:
-                all_digit_peaks.append((int(px), int(digit), float(pscore)))
+            futures_digits.append(ex_digits.submit(detect_digit_worker, d))
 
-        # Assemble digits left-to-right (assume min_distance avoided duplicates)
+        all_digit_peaks = []
+        for f in futures.as_completed(futures_digits):
+            try:
+                res_list = f.result()
+                if res_list:
+                    all_digit_peaks.extend(res_list)
+            except Exception:
+                # ignore worker failures for robustness
+                continue
+
         if not all_digit_peaks:
-            print(f'No digits detected for {res_name}')
-            results[res_name] = None
-        else:
-            all_digit_peaks.sort(key=lambda t: t[0])
-            assembled = ''.join(str(int(d)) for (_, d, _) in all_digit_peaks)
-            print(f'{res_name.title()}:', assembled)
-            results[res_name] = assembled
+            return None
+        # sort left-to-right and assemble
+        all_digit_peaks.sort(key=lambda t: t[0])
+        assembled = ''.join(str(int(d)) for (_, d, _) in all_digit_peaks)
+        return assembled
 
-    # Optionally return the assembled results dict for programmatic use
+    # Submit resource tasks and collect results as they complete. Use a try/finally
+    # so that executors are always shut down even if submission or processing fails.
+    # Attempt to submit resource tasks in parallel; if submission fails, fall
+    # back to a sequential loop so callers still get a results dict.
+    future_to_res = {}
+    try:
+        print(f'Submitting {len(resources)} resource tasks to executor...')
+        future_to_res = {ex_resources.submit(process_resource, name, fname): (name, fname) for name, fname in resources}
+        print('Submission complete, waiting for results...')
+        for fut in futures.as_completed(future_to_res):
+            name, _ = future_to_res[fut]
+            try:
+                val = fut.result()
+                if val is None:
+                    print(f"{name.title()} icon or digits not found")
+                    results[name] = None
+                else:
+                    print(f"{name.title()}:", val)
+                    results[name] = val
+            except Exception as e:
+                print(f"Error processing resource {name}:", e)
+                results[name] = None
+    except Exception as e:
+        # If the executor itself failed for some reason, run resources sequentially
+        print('Parallel submission failed, falling back to sequential processing:', e)
+        for name, fname in resources:
+            try:
+                val = process_resource(name, fname)
+                if val is None:
+                    print(f"{name.title()} icon or digits not found")
+                    results[name] = None
+                else:
+                    print(f"{name.title()}:", val)
+                    results[name] = val
+            except Exception as e2:
+                print(f'Error processing resource {name} sequentially:', e2)
+                results[name] = None
+    finally:
+        # Ensure executors are always shut down
+        try:
+            ex_digits.shutdown(wait=True)
+        except Exception:
+            pass
+        try:
+            ex_resources.shutdown(wait=True)
+        except Exception:
+            pass
+
     return results
 
 if __name__ == "__main__":
-
-    summarize_eco()
+    results = summarize_eco()
+    # Print a concise summary for quick visibility when run as a script
+    print('\nResource summary:')
+    for k, v in (results or {}).items():
+        print(f'  {k}: {v}')

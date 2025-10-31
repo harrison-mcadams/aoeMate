@@ -67,6 +67,39 @@ def convolve_ssXkernel(ss: Image.Image, kernel: Image.Image, *, out_path: Option
     return res  # float32 map with values typically in [-1, 1]
 
 
+def match_template_arrays(ss_gray: np.ndarray, k_gray: np.ndarray, *, out_path: Optional[str] = None) -> np.ndarray:
+    """Run matchTemplate on precomputed grayscale arrays.
+
+    Inputs:
+      - ss_gray: 2D numpy array (float32) representing the screenshot in grayscale
+      - k_gray: 2D numpy array (float32) representing the kernel in grayscale
+      - out_path: optional directory path to save diagnostics (if provided)
+
+    Returns:
+      - res: numpy.ndarray (float32) response map from cv2.matchTemplate
+
+    This function mirrors `convolve_ssXkernel` but operates on arrays to
+    avoid repeated PIL.Image -> numpy conversions for callers that can precompute arrays.
+    """
+    # Ensure dtype float32
+    ss_a = ss_gray.astype(np.float32)
+    k_a = k_gray.astype(np.float32)
+
+    res = cv2.matchTemplate(ss_a, k_a, cv2.TM_CCOEFF_NORMED)
+
+    if out_path:
+        try:
+            rmin = float(res.min())
+            rmax = float(res.max())
+            denom = (rmax - rmin) if (rmax - rmin) != 0 else 1e-8
+            viz = ((res - rmin) / denom * 255.0).clip(0, 255).astype(np.uint8)
+            Image.fromarray(viz).save(os.path.join(out_path, 'convolved_array.png'))
+        except Exception:
+            pass
+
+    return res
+
+
 def is_target_in_ss(res: np.ndarray, target: Image.Image = None, *, out_path: Optional[str] = None, threshold: float = 0.8, min_distance: int = 10, return_peaks: bool = False) -> Union[bool, Tuple[bool, List[Tuple[int,int,float]]]]:
     """Detect peaks in a matchTemplate response map.
 
