@@ -252,7 +252,7 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         return
 
     resource_names = ['food', 'wood', 'gold', 'stone']
-    times = []q
+    times = []
     data = {r: [] for r in resource_names}
 
     sw = int(os.environ.get('AOEMATE_SCREEN_W', '1280'))
