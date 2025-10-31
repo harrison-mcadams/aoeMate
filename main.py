@@ -115,10 +115,12 @@ def summarize_eco():
     kernelPath = '/Users/harrisonmcadams/Desktop/'
 
     resources = [
-        ('gold', 'gold_icon.png'),
+
         ('food', 'food_icon.png'),
-        ('stone', 'stone_icon.png'),
         ('wood', 'wood_icon.png'),
+        ('gold', 'gold_icon.png'),
+        ('stone', 'stone_icon.png'),
+
     ]
 
     results = {}
@@ -249,8 +251,8 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         logging.info('live_monitor_resources: animation already running')
         return
 
-    resource_names = ['gold', 'food', 'stone', 'wood']
-    times = []
+    resource_names = ['food', 'wood', 'gold', 'stone']
+    times = []q
     data = {r: [] for r in resource_names}
 
     sw = int(os.environ.get('AOEMATE_SCREEN_W', '1280'))
