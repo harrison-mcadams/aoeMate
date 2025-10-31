@@ -343,7 +343,92 @@ def summarize_eco():
         assembled_number = ''.join(assembled_digits)
         print('Assembled number (left-to-right):', assembled_number)
 
+    # ...now run the loop over all resources (gold, food, stone, wood)
+    resources = [
+        ('gold', 'gold_icon.png'),
+        ('food', 'food_icon.png'),
+        ('stone', 'stone_icon.png'),
+        ('wood', 'wood_icon.png'),
+    ]
+
+    # Prepare a results dict to collect assembled values per resource
+    results = {}
+
+    # Base region bbox (screen coordinates) for later absolute conversions
+    eco_summary_bbox = get_ss.get_bbox('eco_summary')
+
+    # Tuning values used to expand from icon center to final capture boxes
+    fudge_factor = 10  # small padding in pixels around boxes
+
+    for res_name, icon_fname in resources:
+        # Load the icon kernel for this resource; skip if missing
+        try:
+            kernel = Image.open(kernelPath + icon_fname)
+        except Exception:
+            print(f"Resource kernel missing for {res_name}: {icon_fname}")
+            results[res_name] = None
+            continue
+
+        # Match the resource icon within the eco_summary screenshot
+        res_conv = analyze_ss.convolve_ssXkernel(screenshot, kernel, out_path=out_path)
+        found, peaks = analyze_ss.is_target_in_ss(res_conv, kernel, out_path=out_path, return_peaks=True)
+
+        if not found or not peaks:
+            print(f"{res_name.title()} icon not found in eco_summary")
+            results[res_name] = None
+            continue
+
+        # Use the first detected peak as the canonical icon location (relative to screenshot)
+        peak_x, peak_y, peak_score = peaks[0]
+
+        # Compute screen-relative top/left for the icon
+        top = eco_summary_bbox['top'] + int(peak_y)
+        left = eco_summary_bbox['left'] + int(peak_x)
+
+        # Icon dimensions (px)
+        icon_w, icon_h = kernel.size
+
+        # Build a bbox to the right of the icon where the numeric count usually appears
+        count_width = 100  # heuristic; adjust if necessary
+        count_bbox = {
+            'top': int(top - fudge_factor),
+            'left': int(left + icon_w + 2),
+            'width': int(count_width),
+            'height': int(icon_h + fudge_factor * 2)
+        }
+
+        # Capture the region containing the numeric count
+        count_img = get_ss.capture_gfn_screen_region(count_bbox, out_path=out_path)
+
+        # Detect digits 0-9 within the captured count image and collect peaks
+        all_digit_peaks = []  # list of (x, digit, score)
+        per_digit_min_distance = 5
+        for digit in range(10):
+            try:
+                digit_kernel = Image.open(kernelPath + f'{digit}.png')
+            except Exception:
+                continue
+
+            conv = analyze_ss.convolve_ssXkernel(count_img, digit_kernel, out_path=out_path)
+            found_d, peaks_d = analyze_ss.is_target_in_ss(conv, digit_kernel, out_path=out_path, return_peaks=True, min_distance=per_digit_min_distance)
+            if not found_d:
+                continue
+            for (px, py, pscore) in peaks_d:
+                all_digit_peaks.append((int(px), int(digit), float(pscore)))
+
+        # Assemble digits left-to-right (assume min_distance avoided duplicates)
+        if not all_digit_peaks:
+            print(f'No digits detected for {res_name}')
+            results[res_name] = None
+        else:
+            all_digit_peaks.sort(key=lambda t: t[0])
+            assembled = ''.join(str(int(d)) for (_, d, _) in all_digit_peaks)
+            print(f'{res_name.title()}:', assembled)
+            results[res_name] = assembled
+
+    # Optionally return the assembled results dict for programmatic use
+    return results
 
 if __name__ == "__main__":
-    # Example entry point: run the eco-summary demonstration
+
     summarize_eco()
