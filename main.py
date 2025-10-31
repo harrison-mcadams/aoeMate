@@ -398,107 +398,156 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                 del data[r][:-limit]
 
     def render_frame():
+        # Increase whitespace & margins for a more spacious look
         canvas = 255 * np.ones((win_h, win_w, 3), dtype=np.uint8)
-        pad = 8
+        pad = 12  # more vertical padding between plots
+        left_margin = 80
+        right_margin = 40
         plot_h = (win_h - (len(resource_names) + 1) * pad) // len(resource_names)
-        left_margin = 60
-        right_margin = 20
+
+        # First pass: compute plotting primitives and smoothed rates for each resource
+        entries = []  # list of dicts with drawing info per resource
+        global_vals = []
+        global_rates = []
         for i, r in enumerate(resource_names):
-            top = pad + i * (plot_h + pad)
-            bottom = top + plot_h
-            cv2.rectangle(canvas, (left_margin - 10, top), (win_w - right_margin, bottom), (240, 240, 240), -1)
             vals = data.get(r, [])
             n = len(vals)
-            # Ensure rates variable exists regardless of data length
+            xs = np.linspace(left_margin, win_w - right_margin, n) if n > 0 else np.array([])
+
+            # compute simple per-sample smoothed rate (fallback behavior when possible)
             rates = []
-            if n >= 2:
-                valid = [v for v in vals if not math.isnan(v)]
-                if valid:
-                    vmin = min(valid)
-                    vmax = max(valid)
-                    vrange = vmax - vmin if vmax != vmin else 1.0
-                else:
-                    vmin, vmax, vrange = 0.0, 1.0, 1.0
-                xs = np.linspace(left_margin, win_w - right_margin, n)
-                pts = []
-                for k, val in enumerate(vals):
-                    if math.isnan(val):
-                        y = bottom - 4
+            smoothed_rates = []
+            t_secs = None
+            if n >= 2 and len(times) >= 2:
+                try:
+                    t_secs = [(t - times[0]).total_seconds() for t in times[-n:]] if len(times) >= n else [(times[i] - times[0]).total_seconds() for i in range(n)]
+                except Exception:
+                    t_secs = [float(i) for i in range(n)]
+                if len(t_secs) != n:
+                    t_secs = [float(i) for i in range(n)]
+                # forward-fill NaNs for rate computation
+                raw_vals = []
+                for ii, v in enumerate(vals):
+                    if ii == 0:
+                        raw_vals.append(0.0 if (v is None or (isinstance(v, float) and math.isnan(v))) else float(v))
                     else:
-                        y = int(top + (plot_h - 20) * (1.0 - (val - vmin) / vrange)) + 10
-                    x = int(xs[k])
-                    pts.append((x, y))
+                        if v is None or (isinstance(v, float) and math.isnan(v)):
+                            raw_vals.append(raw_vals[-1])
+                        else:
+                            raw_vals.append(float(v))
+
+                # compute forward diffs as simple rate estimate
+                for ii in range(n):
+                    if ii == 0:
+                        dt = t_secs[1] - t_secs[0] if n > 1 else 1.0
+                        dv = raw_vals[1] - raw_vals[0] if n > 1 else 0.0
+                    else:
+                        dt = t_secs[ii] - t_secs[ii - 1]
+                        if dt == 0:
+                            dt = 1.0
+                        dv = raw_vals[ii] - raw_vals[ii - 1]
+                    if dv < 0:
+                        dv = 0.0
+                    rates.append((dv / max(1e-6, dt)) * 60.0)
+                # quick EMA smoothing
+                for ii, rrr in enumerate(rates):
+                    if ii == 0:
+                        smoothed_rates.append(rrr)
+                    else:
+                        try:
+                            dt = t_secs[ii] - t_secs[ii - 1]
+                            if dt <= 0:
+                                dt = 1.0
+                        except Exception:
+                            dt = 1.0
+                        alpha = 1.0 - math.exp(-dt / RATE_TAU)
+                        smoothed_rates.append(alpha * rrr + (1.0 - alpha) * smoothed_rates[-1])
+
+            # compute vmin/vmax for left axis
+            valid = [v for v in vals if not math.isnan(v)]
+            if valid:
+                vmin = min(valid)
+                vmax = max(valid)
+            else:
+                vmin, vmax = 0.0, 1.0
+
+            global_vals.extend([v for v in valid])
+            global_rates.extend([r for r in smoothed_rates if not math.isnan(r)])
+
+            entries.append({
+                'name': r,
+                'xs': xs,
+                'vals': vals,
+                'n': n,
+                'vmin': vmin,
+                'vmax': vmax,
+                'smoothed_rates': smoothed_rates,
+            })
+
+        # Lock left y-axis across subplots
+        if global_vals:
+            G_vmin = min(global_vals)
+            G_vmax = max(global_vals)
+            if G_vmin == G_vmax:
+                G_vmax = G_vmin + 1.0
+        else:
+            G_vmin, G_vmax = 0.0, 1.0
+
+        # Lock right y-axis (rates) across subplots
+        if global_rates:
+            G_rmin = min(global_rates)
+            G_rmax = max(global_rates)
+            if G_rmin == G_rmax:
+                G_rmax = G_rmin + 1.0
+        else:
+            G_rmin, G_rmax = 0.0, 1.0
+
+        # Second pass: draw each subplot using locked axes and a bit more spacing
+        for i, ent in enumerate(entries):
+            top = pad + i * (plot_h + pad)
+            bottom = top + plot_h
+            left = left_margin
+            right = win_w - right_margin
+            # background box
+            cv2.rectangle(canvas, (left - 10, top), (right, bottom), (240, 240, 240), -1)
+
+            xs = ent['xs']
+            vals = ent['vals']
+            n = ent['n']
+
+            # Plot resource totals scaled to global vmin/vmax
+            pts = []
+            vrange = G_vmax - G_vmin if G_vmax != G_vmin else 1.0
+            for k in range(n):
+                val = vals[k]
+                if math.isnan(val):
+                    y = bottom - 4
+                else:
+                    y = int(top + (plot_h - 20) * (1.0 - (float(val) - G_vmin) / vrange)) + 10
+                x = int(xs[k])
+                pts.append((x, y))
+            if pts:
                 pts_arr = np.array(pts, dtype=np.int32)
                 cv2.polylines(canvas, [pts_arr], False, (0, 120, 255), 2, lineType=cv2.LINE_AA)
                 for (x, y) in pts:
                     cv2.circle(canvas, (x, y), 3, (0, 80, 200), -1)
-                cv2.putText(canvas, f'{int(vmax)}', (6, top + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
-                cv2.putText(canvas, f'{int(vmin)}', (6, bottom - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
-                # --- compute and plot resource gather rate (units per minute) on right axis ---
-                # Compute rates between consecutive points (aligned to same xs). rate[i] = (val[i]-val[i-1]) / dt * 60
-                rates = []
-                if len(times) >= 2:
-                    # Build elapsed times corresponding to data points
-                    t_secs = [ (t - times[0]).total_seconds() for t in times[-n:] ] if len(times) >= n else [ (times[i] - times[0]).total_seconds() for i in range(n) ]
-                    # If t_secs length mismatches, fallback to uniform spacing of 1 sec
-                    if len(t_secs) != n:
-                        t_secs = list(range(n))
-                    for i in range(n):
-                        if i == 0:
-                            # Use forward difference for first point
-                            dt = t_secs[1] - t_secs[0] if n > 1 else 1.0
-                            dv = (vals[1] - vals[0]) if n > 1 and not math.isnan(vals[1]) and not math.isnan(vals[0]) else 0.0
-                        else:
-                            dt = t_secs[i] - t_secs[i-1] if (t_secs[i] - t_secs[i-1]) != 0 else 1.0
-                            dv = 0.0 if math.isnan(vals[i]) or math.isnan(vals[i-1]) else (vals[i] - vals[i-1])
-                        if dt == 0:
-                            rate = 0.0
-                        else:
-                            rate = (dv / dt) * 60.0  # units per minute
-                        rates.append(rate)
-                else:
-                    rates = [0.0] * n
+            # left axis labels
+            cv2.putText(canvas, f'{int(G_vmax)}', (6, top + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+            cv2.putText(canvas, f'{int(G_vmin)}', (6, bottom - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
 
-                # Apply exponential smoothing (EMA) to rates to average over a longer timescale.
-                # RATE_TAU (seconds) controls the smoothing window; it's read from AOE_RATE_TAU_SEC.
-                smoothed_rates = []
-                if rates:
-                    # t_secs should exist and align with rates; ensure fallback dt
-                    # compute EMA with time-varying alpha: alpha = 1 - exp(-dt / tau)
-                    for i, rate in enumerate(rates):
-                        if i == 0:
-                            smoothed_rates.append(rate)
-                        else:
-                            # determine dt between samples; fall back to 1 sec if unknown
-                            try:
-                                dt = t_secs[i] - t_secs[i - 1]
-                                if dt <= 0:
-                                    dt = 1.0
-                            except Exception:
-                                dt = 1.0
-                            alpha = 1.0 - math.exp(-dt / RATE_TAU)
-                            s_prev = smoothed_rates[-1]
-                            s = alpha * rate + (1.0 - alpha) * s_prev
-                            smoothed_rates.append(s)
-                else:
-                    smoothed_rates = []
-
-                # Determine rate axis scale and map to pixel y positions on right using smoothed rates
-                valid_rates = [r for r in smoothed_rates if not math.isnan(r)]
-                if valid_rates:
-                    rmin = min(valid_rates)
-                    rmax = max(valid_rates)
-                    rrange = rmax - rmin if rmax != rmin else 1.0
-                    # Build points for rate curve from smoothed rates
-                    pts_rate = []
-                    for k, srate in enumerate(smoothed_rates):
-                        if math.isnan(srate):
-                            y_r = bottom - 4
-                        else:
-                            y_r = int(top + (plot_h - 20) * (1.0 - (srate - rmin) / rrange)) + 10
-                        x = int(xs[k])
-                        pts_rate.append((x, y_r))
-                    # Draw dotted smoothed rate line
+            # Plot smoothed rate on right axis using global rate limits
+            srates = ent['smoothed_rates']
+            if srates:
+                rrange = G_rmax - G_rmin if G_rmax != G_rmin else 1.0
+                pts_rate = []
+                for k, srate in enumerate(srates):
+                    if math.isnan(srate):
+                        y_r = bottom - 4
+                    else:
+                        y_r = int(top + (plot_h - 20) * (1.0 - (srate - G_rmin) / rrange)) + 10
+                    x = int(xs[k])
+                    pts_rate.append((x, y_r))
+                if pts_rate:
                     pts_rate_arr = np.array(pts_rate, dtype=np.int32)
                     try:
                         cv2.polylines(canvas, [pts_rate_arr], False, (34, 139, 34), 1, lineType=cv2.LINE_AA)
@@ -506,26 +555,26 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                         pass
                     for (xr, yr) in pts_rate:
                         cv2.circle(canvas, (xr, yr), 2, (34, 139, 34), -1)
-                    # Right axis labels for smoothed rate
-                    cv2.putText(canvas, f'{int(rmax)}', (win_w - right_margin - 2, top + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (34, 139, 34), 1, cv2.LINE_AA)
-                    cv2.putText(canvas, f'{int(rmin)}', (win_w - right_margin - 2, bottom - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (34, 139, 34), 1, cv2.LINE_AA)
-            else:
-                cv2.putText(canvas, 'waiting for data...', (left_margin + 10, top + plot_h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 1, cv2.LINE_AA)
-            # Current value and inline smoothed rate
-            cur = data[r][-1] if data[r] else math.nan
+                # right axis labels
+                cv2.putText(canvas, f'{int(G_rmax)}', (win_w - right_margin - 2, top + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (34, 139, 34), 1, cv2.LINE_AA)
+                cv2.putText(canvas, f'{int(G_rmin)}', (win_w - right_margin - 2, bottom - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (34, 139, 34), 1, cv2.LINE_AA)
+
+            # Title (lowered a bit)
+            title_y = top + 14
+            cv2.putText(canvas, ent['name'].title(), (left_margin - 10, title_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (10, 10, 10), 2, cv2.LINE_AA)
+
+            # Current value + inline rate text
+            cur = vals[-1] if vals else math.nan
             cur_text = str(int(cur)) if (not math.isnan(cur)) else 'NaN'
             latest_rate_text = ''
             try:
-                if smoothed_rates:
-                    latest_s = smoothed_rates[-1]
+                if ent['smoothed_rates']:
+                    latest_s = ent['smoothed_rates'][-1]
                     if latest_s is not None and (not math.isnan(latest_s)):
                         latest_rate_text = f' ({latest_s:.1f}/min)'
             except Exception:
                 latest_rate_text = ''
-
             display_text = f'{cur_text}{latest_rate_text}'
-            # Title
-            cv2.putText(canvas, r.title(), (left_margin - 10, top - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (10, 10, 10), 2, cv2.LINE_AA)
             # Right-aligned current value + rate on single line; shrink to fit if needed
             font = cv2.FONT_HERSHEY_SIMPLEX
             scale = 0.7
