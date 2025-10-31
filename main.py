@@ -1,5 +1,4 @@
 import os
-import time
 import math
 import logging
 from datetime import datetime
@@ -11,6 +10,8 @@ from PIL import Image
 import cv2
 import numpy as np
 import concurrent.futures as futures
+import threading
+import atexit
 
 # Configure logging
 log_path = Path(__file__).resolve().parent / 'aoemate.log'
@@ -24,6 +25,74 @@ logging.basicConfig(
 )
 
 _LIVE_ANIMATION = None
+
+# Module-level cache for kernels and executors to avoid repeated I/O and thread creation
+_KERNEL_PATH = os.environ.get('AOE_KERNEL_PATH', '/Users/harrisonmcadams/Desktop/')
+_RESOURCE_KERNELS = {}
+_RESOURCE_KERNELS_GRAY = {}
+_DIGIT_KERNELS_GRAY = {}
+_KERNELS_LOADED = False
+_KERNELS_LOCK = threading.Lock()
+_MAX_WORKERS = max(2, min(8, (os.cpu_count() or 4)))
+_EX_DIGITS = None
+_EX_RESOURCES = None
+
+
+def _init_kernels_and_executors(resources):
+    """Load resource and digit kernels once, and create shared executors.
+
+    Thread-safe and idempotent. `resources` is a list of (name, filename) pairs
+    used to size the resource executor properly.
+    """
+    global _KERNELS_LOADED, _RESOURCE_KERNELS, _RESOURCE_KERNELS_GRAY, _DIGIT_KERNELS_GRAY, _EX_DIGITS, _EX_RESOURCES
+    if _KERNELS_LOADED:
+        return
+    with _KERNELS_LOCK:
+        if _KERNELS_LOADED:
+            return
+        # load resource kernels and precompute grayscale arrays
+        for _, icon_fname in resources:
+            try:
+                kimg = Image.open(os.path.join(_KERNEL_PATH, icon_fname))
+                _RESOURCE_KERNELS[icon_fname] = kimg
+                _RESOURCE_KERNELS_GRAY[icon_fname] = np.array(kimg.convert('L'), dtype=np.float32)
+            except Exception:
+                _RESOURCE_KERNELS[icon_fname] = None
+                _RESOURCE_KERNELS_GRAY[icon_fname] = None
+        # load digit kernels and precompute gray arrays
+        for d in range(10):
+            try:
+                k = Image.open(os.path.join(_KERNEL_PATH, f'{d}.png'))
+                _DIGIT_KERNELS_GRAY[d] = np.array(k.convert('L'), dtype=np.float32)
+            except Exception:
+                _DIGIT_KERNELS_GRAY[d] = None
+        # create executors
+        try:
+            _EX_DIGITS = futures.ThreadPoolExecutor(max_workers=_MAX_WORKERS)
+        except Exception:
+            _EX_DIGITS = None
+        try:
+            _EX_RESOURCES = futures.ThreadPoolExecutor(max_workers=min(len(resources), _MAX_WORKERS))
+        except Exception:
+            _EX_RESOURCES = None
+        _KERNELS_LOADED = True
+
+
+def _shutdown_executors():
+    global _EX_DIGITS, _EX_RESOURCES
+    try:
+        if _EX_DIGITS is not None:
+            _EX_DIGITS.shutdown(wait=True)
+    except Exception:
+        pass
+    try:
+        if _EX_RESOURCES is not None:
+            _EX_RESOURCES.shutdown(wait=True)
+    except Exception:
+        pass
+
+# Ensure executors shut down on process exit
+atexit.register(_shutdown_executors)
 
 
 def are_vills_producing():
@@ -112,54 +181,47 @@ def summarize_eco():
     screenshot = get_ss.capture_gfn_screen_region(eco_summary)
 
     out_path = None
-    kernelPath = '/Users/harrisonmcadams/Desktop/'
+    # Allow kernel path to be overridden with env var AOE_KERNEL_PATH
+    kernelPath = _KERNEL_PATH
 
     resources = [
-
         ('food', 'food_icon.png'),
         ('wood', 'wood_icon.png'),
         ('gold', 'gold_icon.png'),
         ('stone', 'stone_icon.png'),
-
     ]
 
     results = {}
     eco_summary_bbox = eco_summary
     fudge_factor = 10
 
-    # Load resource kernels and digit kernels
-    resource_kernels = {}
-    for _, icon_fname in resources:
-        try:
-            resource_kernels[icon_fname] = Image.open(kernelPath + icon_fname)
-        except Exception:
-            resource_kernels[icon_fname] = None
+    # Initialize module-level caches and shared executors (idempotent)
+    _init_kernels_and_executors(resources)
+    resource_kernels = _RESOURCE_KERNELS
+    resource_kernels_gray = _RESOURCE_KERNELS_GRAY
+    digit_kernels_gray = _DIGIT_KERNELS_GRAY
+    ex_digits = _EX_DIGITS
+    ex_resources = _EX_RESOURCES
 
-    digit_kernels = {}
-    for digit in range(10):
-        try:
-            digit_kernels[digit] = Image.open(kernelPath + f'{digit}.png')
-        except Exception:
-            digit_kernels[digit] = None
-
-    max_workers = max(2, min(8, (os.cpu_count() or 4)))
-    digit_kernels_gray = {d: (np.array(k.convert('L'), dtype=np.float32) if k is not None else None) for d, k in digit_kernels.items()}
-
-    ex_digits = futures.ThreadPoolExecutor(max_workers=max_workers)
-    ex_resources = futures.ThreadPoolExecutor(max_workers=min(len(resources), max_workers))
+    # Precompute screenshot grayscale array once and reuse in workers
+    ss_gray = np.array(screenshot.convert('L'), dtype=np.float32)
 
     def process_resource(res_name: str, icon_fname: str):
-        kernel = resource_kernels.get(icon_fname)
-        if kernel is None:
+        # Use precomputed grayscale kernel array to avoid PIL->numpy each call
+        k_gray = resource_kernels_gray.get(icon_fname)
+        if k_gray is None:
             return None
-        res_conv = analyze_ss.convolve_ssXkernel(screenshot, kernel, out_path=out_path)
-        found, peaks = analyze_ss.is_target_in_ss(res_conv, kernel, out_path=out_path, return_peaks=True)
+        res_conv = analyze_ss.match_template_arrays(ss_gray, k_gray, out_path=out_path)
+        found, peaks = analyze_ss.is_target_in_ss(res_conv, k_gray, out_path=out_path, return_peaks=True)
         if not found or not peaks:
             return None
         peak_x, peak_y, peak_score = peaks[0]
         top = eco_summary_bbox['top'] + int(peak_y)
         left = eco_summary_bbox['left'] + int(peak_x)
-        icon_w, icon_h = kernel.size
+        # kernel array shape is (h, w)
+        kh = k_gray.shape[0]
+        kw = k_gray.shape[1]
+        icon_w, icon_h = kw, kh
         count_width = 100
         count_bbox = {
             'top': int(top - fudge_factor),
@@ -175,6 +237,7 @@ def summarize_eco():
 
         per_digit_min_distance = 5
         futures_digits = []
+        all_digit_peaks = []
 
         def detect_digit_worker(dd: int):
             dk = digit_kernels_gray.get(dd)
@@ -186,12 +249,29 @@ def summarize_eco():
                 return []
             return [(int(px), int(dd), float(pscore)) for (px, py, pscore) in peaks_d]
 
-        for d in range(10):
-            if digit_kernels_gray.get(d) is None:
-                continue
-            futures_digits.append(ex_digits.submit(detect_digit_worker, d))
+        # Submit digit detection to shared executor (if available)
+        if ex_digits is not None:
+            for d in range(10):
+                if digit_kernels_gray.get(d) is None:
+                    continue
+                futures_digits.append(ex_digits.submit(detect_digit_worker, d))
+        else:
+            # fallback: run sequentially and collect results immediately
+            for d in range(10):
+                if digit_kernels_gray.get(d) is None:
+                    continue
+                try:
+                    res_list = detect_digit_worker(d)
+                    if res_list:
+                        all_digit_peaks.extend(res_list)
+                except Exception:
+                    continue
+            # since we've already processed synchronously, skip the futures loop
+            if all_digit_peaks:
+                all_digit_peaks.sort(key=lambda t: t[0])
+                assembled = ''.join(str(int(d)) for (_, d, _) in all_digit_peaks)
+                return assembled
 
-        all_digit_peaks = []
         for f in futures.as_completed(futures_digits):
             try:
                 res_list = f.result()
@@ -209,15 +289,24 @@ def summarize_eco():
     future_to_res = {}
     try:
         logging.info('Submitting %d resource tasks...', len(resources))
-        future_to_res = {ex_resources.submit(process_resource, name, fname): (name, fname) for name, fname in resources}
-        for fut in futures.as_completed(future_to_res):
-            name, _ = future_to_res[fut]
-            try:
-                val = fut.result()
-                results[name] = val
-            except Exception:
-                logging.exception('Error processing resource %s', name)
-                results[name] = None
+        if ex_resources is not None:
+            future_to_res = {ex_resources.submit(process_resource, name, fname): (name, fname) for name, fname in resources}
+            for fut in futures.as_completed(future_to_res):
+                name, _ = future_to_res[fut]
+                try:
+                    val = fut.result()
+                    results[name] = val
+                except Exception:
+                    logging.exception('Error processing resource %s', name)
+                    results[name] = None
+        else:
+            # fallback to sequential processing
+            for name, fname in resources:
+                try:
+                    results[name] = process_resource(name, fname)
+                except Exception:
+                    logging.exception('Error processing resource %s sequentially', name)
+                    results[name] = None
     except Exception:
         logging.exception('Parallel submission failed; running sequentially')
         for name, fname in resources:
@@ -228,14 +317,8 @@ def summarize_eco():
                 logging.exception('Sequential processing failed for %s', name)
                 results[name] = None
     finally:
-        try:
-            ex_digits.shutdown(wait=True)
-        except Exception:
-            pass
-        try:
-            ex_resources.shutdown(wait=True)
-        except Exception:
-            pass
+        # Do not shutdown shared executors here; they are global and cleaned up at exit.
+        pass
 
     return results
 
