@@ -350,6 +350,26 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
     except Exception:
         pass
 
+    # Allow widening of the kept history window by a multiplicative factor.
+    # Default is 1.2 (20% wider than `max_points`). Can be overridden via
+    # the environment variable AOE_TIME_WINDOW_SCALE.
+    try:
+        time_window_scale = float(os.environ.get('AOE_TIME_WINDOW_SCALE', '1.0'))
+        if time_window_scale <= 0:
+            time_window_scale = 1.0
+    except Exception:
+        time_window_scale = 1.0
+
+    # Rate smoothing time constant (seconds). Larger values => smoother, longer timescale.
+    try:
+        # Default to 90 seconds for a longer averaging window; user can override
+        # with the AOE_RATE_TAU_SEC environment variable (in seconds).
+        RATE_TAU = float(os.environ.get('AOE_RATE_TAU_SEC', '20.0'))
+        if RATE_TAU <= 0:
+            RATE_TAU = 20.0
+    except Exception:
+        RATE_TAU = 20.0
+
     start_time = datetime.now()
 
     def _append_values(results):
@@ -370,10 +390,12 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                         data[r].append(float(sval))
                     except Exception:
                         data[r].append(math.nan)
-        if len(times) > max_points:
-            del times[:-max_points]
+        # Trim history to the scaled window (increase by ~20% by default)
+        limit = max(2, int(max_points * time_window_scale))
+        if len(times) > limit:
+            del times[:-limit]
             for r in resource_names:
-                del data[r][:-max_points]
+                del data[r][:-limit]
 
     def render_frame():
         canvas = 255 * np.ones((win_h, win_w, 3), dtype=np.uint8)
@@ -387,6 +409,8 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
             cv2.rectangle(canvas, (left_margin - 10, top), (win_w - right_margin, bottom), (240, 240, 240), -1)
             vals = data.get(r, [])
             n = len(vals)
+            # Ensure rates variable exists regardless of data length
+            rates = []
             if n >= 2:
                 valid = [v for v in vals if not math.isnan(v)]
                 if valid:
@@ -435,41 +459,88 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                 else:
                     rates = [0.0] * n
 
-                # Determine rate axis scale and map to pixel y positions on right
-                valid_rates = [r for r in rates if not math.isnan(r)]
+                # Apply exponential smoothing (EMA) to rates to average over a longer timescale.
+                # RATE_TAU (seconds) controls the smoothing window; it's read from AOE_RATE_TAU_SEC.
+                smoothed_rates = []
+                if rates:
+                    # t_secs should exist and align with rates; ensure fallback dt
+                    # compute EMA with time-varying alpha: alpha = 1 - exp(-dt / tau)
+                    for i, rate in enumerate(rates):
+                        if i == 0:
+                            smoothed_rates.append(rate)
+                        else:
+                            # determine dt between samples; fall back to 1 sec if unknown
+                            try:
+                                dt = t_secs[i] - t_secs[i - 1]
+                                if dt <= 0:
+                                    dt = 1.0
+                            except Exception:
+                                dt = 1.0
+                            alpha = 1.0 - math.exp(-dt / RATE_TAU)
+                            s_prev = smoothed_rates[-1]
+                            s = alpha * rate + (1.0 - alpha) * s_prev
+                            smoothed_rates.append(s)
+                else:
+                    smoothed_rates = []
+
+                # Determine rate axis scale and map to pixel y positions on right using smoothed rates
+                valid_rates = [r for r in smoothed_rates if not math.isnan(r)]
                 if valid_rates:
                     rmin = min(valid_rates)
                     rmax = max(valid_rates)
                     rrange = rmax - rmin if rmax != rmin else 1.0
-                    # Build points for rate curve
+                    # Build points for rate curve from smoothed rates
                     pts_rate = []
-                    for k, rate in enumerate(rates):
-                        if math.isnan(rate):
+                    for k, srate in enumerate(smoothed_rates):
+                        if math.isnan(srate):
                             y_r = bottom - 4
                         else:
-                            y_r = int(top + (plot_h - 20) * (1.0 - (rate - rmin) / rrange)) + 10
+                            y_r = int(top + (plot_h - 20) * (1.0 - (srate - rmin) / rrange)) + 10
                         x = int(xs[k])
                         pts_rate.append((x, y_r))
-                    # Draw dotted rate line: small circles at each sample and a thin polyline
+                    # Draw dotted smoothed rate line
                     pts_rate_arr = np.array(pts_rate, dtype=np.int32)
-                    # thin semi-transparent line for continuity
                     try:
                         cv2.polylines(canvas, [pts_rate_arr], False, (34, 139, 34), 1, lineType=cv2.LINE_AA)
                     except Exception:
                         pass
                     for (xr, yr) in pts_rate:
                         cv2.circle(canvas, (xr, yr), 2, (34, 139, 34), -1)
-                    # Right axis labels for rate
+                    # Right axis labels for smoothed rate
                     cv2.putText(canvas, f'{int(rmax)}', (win_w - right_margin - 2, top + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (34, 139, 34), 1, cv2.LINE_AA)
                     cv2.putText(canvas, f'{int(rmin)}', (win_w - right_margin - 2, bottom - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (34, 139, 34), 1, cv2.LINE_AA)
-                    # small label indicating units
-                    cv2.putText(canvas, '/min', (win_w - right_margin - 40, top + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (34, 139, 34), 1, cv2.LINE_AA)
             else:
                 cv2.putText(canvas, 'waiting for data...', (left_margin + 10, top + plot_h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 1, cv2.LINE_AA)
+            # Current value and inline smoothed rate
             cur = data[r][-1] if data[r] else math.nan
             cur_text = str(int(cur)) if (not math.isnan(cur)) else 'NaN'
+            latest_rate_text = ''
+            try:
+                if smoothed_rates:
+                    latest_s = smoothed_rates[-1]
+                    if latest_s is not None and (not math.isnan(latest_s)):
+                        latest_rate_text = f' ({latest_s:.1f}/min)'
+            except Exception:
+                latest_rate_text = ''
+
+            display_text = f'{cur_text}{latest_rate_text}'
+            # Title
             cv2.putText(canvas, r.title(), (left_margin - 10, top - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (10, 10, 10), 2, cv2.LINE_AA)
-            cv2.putText(canvas, cur_text, (win_w - right_margin - 60, top + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (50, 150, 50), 2, cv2.LINE_AA)
+            # Right-aligned current value + rate on single line; shrink to fit if needed
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            scale = 0.7
+            thickness = 2
+            max_text_width = win_w - right_margin - left_margin - 8
+            (tw, th), _ = cv2.getTextSize(display_text, font, scale, thickness)
+            min_scale = 0.35
+            while tw > max_text_width and scale > min_scale:
+                scale -= 0.05
+                (tw, th), _ = cv2.getTextSize(display_text, font, scale, thickness)
+            tx = max(left_margin, win_w - right_margin - tw - 6)
+            ty = top + 18
+            cv2.putText(canvas, display_text, (tx, ty), font, scale, (50, 150, 50), thickness, cv2.LINE_AA)
+
+        # elapsed time footer
         elapsed = (datetime.now() - start_time).total_seconds()
         cv2.putText(canvas, f'Elapsed: {int(elapsed)}s', (10, win_h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (50, 50, 50), 1, cv2.LINE_AA)
         return canvas
@@ -512,4 +583,9 @@ if __name__ == '__main__':
         poll = float(os.environ.get('AOE_POLL_SEC', '1.0'))
     except Exception:
         poll = 1.0
-    live_monitor_resources(poll_sec=poll)
+    try:
+        max_pts = int(os.environ.get('AOE_MAX_POINTS', '300'))
+    except Exception:
+        max_pts = 300
+    # Run the OpenCV live monitor. Use env vars to adjust behavior if desired.
+    live_monitor_resources(poll_sec=poll, max_points=max_pts)
