@@ -6,7 +6,7 @@ from pathlib import Path
 
 import get_ss
 import analyze_ss
-from PIL import Image
+from PIL import Image, ImageFont, ImageDraw
 import cv2
 import numpy as np
 import concurrent.futures as futures
@@ -302,11 +302,29 @@ def _shutdown_executors():
 atexit.register(_shutdown_executors)
 
 
-def are_vills_producing():
-    """Small OpenCV status panel: captures eco_summary and runs villager kernel.
+def check_villager_production(screenshot, vill_kernel=None):
+    """Check if villagers are being produced in the given screenshot."""
+    if vill_kernel is None:
+        try:
+            vill_kernel = Image.open("/Users/harrisonmcadams/Desktop/villager_icon.png")
+        except Exception:
+            logging.exception('Could not load villager kernel')
+            return False
+            
+    out_path = None
+    try:
+        # Generalized detection: crop to top-left ROI (60x60) and lower threshold
+        roi = screenshot.crop((0, 0, 60, 60))
+        conv = analyze_ss.convolve_ssXkernel(roi, vill_kernel, out_path=out_path)
+        binary = analyze_ss.is_target_in_ss(conv, vill_kernel, out_path=out_path, threshold=0.65)
+        return binary
+    except Exception:
+        logging.exception('Analysis error')
+        return False
 
-    This keeps the previous small visual status behavior.
-    """
+
+def are_vills_producing():
+    """Small OpenCV status panel: captures eco_summary and runs villager kernel."""
     try:
         vill_kernel = Image.open("/Users/harrisonmcadams/Desktop/villager_icon.png")
     except Exception:
@@ -317,7 +335,10 @@ def are_vills_producing():
     cv2.resizeWindow('AOEMate', 200, 100)
 
     poll_ms = int(os.environ.get('AOEMATE_POLL_MS', '100'))
-
+    
+    # ... (window positioning logic omitted for brevity, it was in original but not critical to replicate fully if just refactoring logic)
+    # Actually, let's keep the original function body mostly but use the helper
+    
     try:
         import pyautogui
         sw, sh = pyautogui.size()
@@ -335,16 +356,8 @@ def are_vills_producing():
         while True:
             eco_summary = get_ss.get_bbox('eco_summary')
             screenshot = get_ss.capture_gfn_screen_region(eco_summary)
-            out_path = None
-            try:
-                if vill_kernel is None:
-                    binary = False
-                else:
-                    conv = analyze_ss.convolve_ssXkernel(screenshot, vill_kernel, out_path=out_path)
-                    binary = analyze_ss.is_target_in_ss(conv, vill_kernel, out_path=out_path)
-            except Exception:
-                logging.exception('Analysis error')
-                binary = False
+            
+            binary = check_villager_production(screenshot, vill_kernel)
 
             color = (0, 255, 0) if binary else (0, 0, 255)
             status = np.full((win_h, win_w, 3), color, dtype=np.uint8)
@@ -501,9 +514,10 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         logging.info('live_monitor_resources: animation already running')
         return
 
-    resource_names = ['food', 'wood', 'gold', 'stone']
+    resource_names = ['food', 'wood', 'gold', 'stone', 'silver']
     times = []
     data = {r: [] for r in resource_names}
+    vill_data = {r: [] for r in resource_names}
 
     sw = int(os.environ.get('AOEMATE_SCREEN_W', '1280'))
     sh = int(os.environ.get('AOEMATE_SCREEN_H', '800'))
@@ -543,6 +557,7 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         now = datetime.now()
         times.append(now)
         for r in resource_names:
+            # Resource Value
             v = None
             if results and r in results:
                 v = results[r]
@@ -557,6 +572,19 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                         data[r].append(float(sval))
                     except Exception:
                         data[r].append(math.nan)
+            
+            # Villager Value
+            v_vill = None
+            if results and f'{r}_vills' in results:
+                v_vill = results[f'{r}_vills']
+            if v_vill is None:
+                vill_data[r].append(math.nan)
+            else:
+                sval_v = str(v_vill).replace(',', '').strip()
+                try:
+                    vill_data[r].append(int(sval_v))
+                except Exception:
+                    vill_data[r].append(math.nan)
         # Trim history to the scaled window (increase by ~20% by default)
         limit = max(2, int(max_points * time_window_scale))
         if len(times) > limit:
@@ -564,22 +592,108 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
             for r in resource_names:
                 del data[r][:-limit]
 
+    # Pre-load fonts
+    try:
+        font_path = "/System/Library/Fonts/Supplemental/Arial.ttf"
+        font_path_bold = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
+        
+        # Increased sizes for better readability
+        font_axis = ImageFont.truetype(font_path, 14)
+        font_title = ImageFont.truetype(font_path, 18) # Larger title
+        font_val = ImageFont.truetype(font_path, 20)   # Larger value
+        
+        # Bold fonts for Total row
+        font_title_bold = ImageFont.truetype(font_path_bold, 18)
+        font_val_bold = ImageFont.truetype(font_path_bold, 20)
+        
+        # Fonts for Villager Stats
+        font_vill_count = ImageFont.truetype(font_path, 16)
+        font_vill_rate = ImageFont.truetype(font_path, 12)
+        
+        font_status_label = ImageFont.truetype(font_path, 18)
+        font_status_val = ImageFont.truetype(font_path, 36) # Much larger status
+        font_footer = ImageFont.truetype(font_path, 12)
+    except Exception:
+        # Fallback to default if Arial not found
+        font_axis = ImageFont.load_default()
+        font_title = ImageFont.load_default()
+        font_val = ImageFont.load_default()
+        font_title_bold = ImageFont.load_default()
+        font_val_bold = ImageFont.load_default()
+        font_vill_count = ImageFont.load_default()
+        font_vill_rate = ImageFont.load_default()
+        font_status_label = ImageFont.load_default()
+        font_status_val = ImageFont.load_default()
+        font_footer = ImageFont.load_default()
+
     def render_frame():
         # Increase whitespace & margins for a more spacious look
-        canvas = 255 * np.ones((win_h, win_w, 3), dtype=np.uint8)
-        pad = 12  # more vertical padding between plots
+        # Split layout: Left 70% for plots, Right 30% for Villager Status
+        
+        # Create canvas in OpenCV (BGR) for drawing lines/rectangles
+        canvas_cv = 255 * np.ones((win_h, win_w, 3), dtype=np.uint8)
+        
+        # Define areas
+        split_x = int(win_w * 0.7)
+        
+        # --- Left Side: Resource Plots ---
+        pad = 12
         left_margin = 80
-        right_margin = 40
-        plot_h = (win_h - (len(resource_names) + 1) * pad) // len(resource_names)
+        # Increased right margin to accommodate villager stats column
+        right_margin = 140 # relative to split_x
+        
+        plot_w = split_x
+        
+        # Add "Total" to the list of things to plot locally
+        plot_names = resource_names + ['Total']
+        plot_h = (win_h - (len(plot_names) + 1) * pad) // len(plot_names)
 
         # First pass: compute plotting primitives and smoothed rates for each resource
         entries = []  # list of dicts with drawing info per resource
         global_vals = []
         global_rates = []
-        for i, r in enumerate(resource_names):
-            vals = data.get(r, [])
+        
+        # Calculate Total Data
+        total_vals = []
+        if len(times) > 0:
+            n_points = len(times)
+            for i in range(n_points):
+                tot = 0.0
+                valid_count = 0
+                for r in resource_names:
+                    vals = data.get(r, [])
+                    if i < len(vals):
+                        v = vals[i]
+                        if v is not None and not (isinstance(v, float) and math.isnan(v)):
+                            tot += float(v)
+                            valid_count += 1
+                if valid_count > 0:
+                    total_vals.append(tot)
+                else:
+                    total_vals.append(math.nan)
+        
+        for i, r in enumerate(plot_names):
+            if r == 'Total':
+                vals = total_vals
+                # For Total, we can sum villager counts if we want, or just leave it blank
+                # Let's try to sum them for completeness
+                current_vill_count = 0
+                for rn in resource_names:
+                    v_list = vill_data.get(rn, [])
+                    if v_list:
+                        last_v = v_list[-1]
+                        if last_v is not None and not math.isnan(last_v):
+                            current_vill_count += last_v
+            else:
+                vals = data.get(r, [])
+                # Get current villager count
+                v_list = vill_data.get(r, [])
+                current_vill_count = v_list[-1] if v_list else 0
+                if current_vill_count is None or (isinstance(current_vill_count, float) and math.isnan(current_vill_count)):
+                    current_vill_count = 0
+                
             n = len(vals)
-            xs = np.linspace(left_margin, win_w - right_margin, n) if n > 0 else np.array([])
+            xs = np.linspace(left_margin, plot_w - right_margin, n) if n > 0 else np.array([])
 
             # compute simple per-sample smoothed rate (fallback behavior when possible)
             rates = []
@@ -638,8 +752,10 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
             else:
                 vmin, vmax = 0.0, 1.0
 
-            global_vals.extend([v for v in valid])
-            global_rates.extend([r for r in smoothed_rates if not math.isnan(r)])
+            # Only contribute to global scale if NOT Total (Total will likely be much larger)
+            if r != 'Total':
+                global_vals.extend([v for v in valid])
+                global_rates.extend([r for r in smoothed_rates if not math.isnan(r)])
 
             entries.append({
                 'name': r,
@@ -649,9 +765,10 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                 'vmin': vmin,
                 'vmax': vmax,
                 'smoothed_rates': smoothed_rates,
+                'vill_count': current_vill_count
             })
 
-        # Lock left y-axis across subplots
+        # Lock left y-axis across subplots (excluding Total)
         if global_vals:
             G_vmin = min(global_vals)
             G_vmax = max(global_vals)
@@ -660,7 +777,7 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         else:
             G_vmin, G_vmax = 0.0, 1.0
 
-        # Lock right y-axis (rates) across subplots
+        # Lock right y-axis (rates) across subplots (excluding Total)
         if global_rates:
             G_rmin = min(global_rates)
             G_rmax = max(global_rates)
@@ -670,108 +787,225 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
             G_rmin, G_rmax = 0.0, 1.0
 
         # Second pass: draw each subplot using locked axes and a bit more spacing
+        # Draw shapes with OpenCV
         for i, ent in enumerate(entries):
             top = pad + i * (plot_h + pad)
             bottom = top + plot_h
             left = left_margin
-            right = win_w - right_margin
+            right = plot_w - right_margin
             # background box
-            cv2.rectangle(canvas, (left - 10, top), (right, bottom), (240, 240, 240), -1)
+            cv2.rectangle(canvas_cv, (left - 10, top), (right, bottom), (240, 240, 240), -1)
 
             xs = ent['xs']
             vals = ent['vals']
             n = ent['n']
+            name = ent['name']
+            
+            # Determine scale for this plot
+            if name == 'Total':
+                # Use local scale for Total
+                p_vmin = ent['vmin']
+                p_vmax = ent['vmax']
+                if p_vmin == p_vmax: p_vmax += 1.0
+                
+                srates = ent['smoothed_rates']
+                valid_rates = [r for r in srates if not math.isnan(r)]
+                if valid_rates:
+                    p_rmin = min(valid_rates)
+                    p_rmax = max(valid_rates)
+                    if p_rmin == p_rmax: p_rmax += 1.0
+                else:
+                    p_rmin, p_rmax = 0.0, 1.0
+            else:
+                # Use global scale for others
+                p_vmin, p_vmax = G_vmin, G_vmax
+                p_rmin, p_rmax = G_rmin, G_rmax
 
-            # Plot resource totals scaled to global vmin/vmax
+            # Plot resource totals
             pts = []
-            vrange = G_vmax - G_vmin if G_vmax != G_vmin else 1.0
+            vrange = p_vmax - p_vmin if p_vmax != p_vmin else 1.0
             for k in range(n):
                 val = vals[k]
                 if math.isnan(val):
                     y = bottom - 4
                 else:
-                    y = int(top + (plot_h - 20) * (1.0 - (float(val) - G_vmin) / vrange)) + 10
+                    y = int(top + (plot_h - 20) * (1.0 - (float(val) - p_vmin) / vrange)) + 10
                 x = int(xs[k])
                 pts.append((x, y))
             if pts:
                 pts_arr = np.array(pts, dtype=np.int32)
-                cv2.polylines(canvas, [pts_arr], False, (0, 120, 255), 2, lineType=cv2.LINE_AA)
+                color = (0, 0, 0) if name == 'Total' else (0, 120, 255) # Black line for Total
+                thickness = 3 if name == 'Total' else 2
+                cv2.polylines(canvas_cv, [pts_arr], False, color, thickness, lineType=cv2.LINE_AA)
                 for (x, y) in pts:
-                    cv2.circle(canvas, (x, y), 3, (0, 80, 200), -1)
-            # left axis labels
-            cv2.putText(canvas, f'{int(G_vmax)}', (6, top + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
-            cv2.putText(canvas, f'{int(G_vmin)}', (6, bottom - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+                    cv2.circle(canvas_cv, (x, y), 3, (0, 80, 200), -1)
+            
+            # Store scale for text rendering
+            ent['p_vmin'] = p_vmin
+            ent['p_vmax'] = p_vmax
+            ent['p_rmin'] = p_rmin
+            ent['p_rmax'] = p_rmax
 
-            # Plot smoothed rate on right axis using global rate limits
+            # Plot smoothed rate on right axis
             srates = ent['smoothed_rates']
             if srates:
-                rrange = G_rmax - G_rmin if G_rmax != G_rmin else 1.0
+                rrange = p_rmax - p_rmin if p_rmax != p_rmin else 1.0
                 pts_rate = []
                 for k, srate in enumerate(srates):
                     if math.isnan(srate):
                         y_r = bottom - 4
                     else:
-                        y_r = int(top + (plot_h - 20) * (1.0 - (srate - G_rmin) / rrange)) + 10
+                        y_r = int(top + (plot_h - 20) * (1.0 - (srate - p_rmin) / rrange)) + 10
                     x = int(xs[k])
                     pts_rate.append((x, y_r))
                 if pts_rate:
                     pts_rate_arr = np.array(pts_rate, dtype=np.int32)
                     try:
-                        cv2.polylines(canvas, [pts_rate_arr], False, (34, 139, 34), 1, lineType=cv2.LINE_AA)
+                        cv2.polylines(canvas_cv, [pts_rate_arr], False, (34, 139, 34), 1, lineType=cv2.LINE_AA)
                     except Exception:
                         pass
                     for (xr, yr) in pts_rate:
-                        cv2.circle(canvas, (xr, yr), 2, (34, 139, 34), -1)
-                # right axis labels
-                cv2.putText(canvas, f'{int(G_rmax)}', (win_w - right_margin - 2, top + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (34, 139, 34), 1, cv2.LINE_AA)
-                cv2.putText(canvas, f'{int(G_rmin)}', (win_w - right_margin - 2, bottom - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (34, 139, 34), 1, cv2.LINE_AA)
+                        cv2.circle(canvas_cv, (xr, yr), 2, (34, 139, 34), -1)
 
-            # Title (lowered a bit)
-            title_y = top + 14
-            cv2.putText(canvas, ent['name'].title(), (left_margin - 10, title_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (10, 10, 10), 2, cv2.LINE_AA)
+        # --- Right Side: Villager Status ---
+        # Draw a large box
+        status_color = (100, 255, 100) if current_vill_status else (100, 100, 255) # Light Green or Light Red
+        text_color_rgb = (0, 100, 0) if current_vill_status else (100, 0, 0) # Dark Green or Dark Red (RGB for PIL)
+        
+        box_margin = 20
+        box_left = split_x + box_margin
+        box_right = win_w - box_margin
+        box_top = box_margin
+        box_bottom = win_h - box_margin
+        
+        cv2.rectangle(canvas_cv, (box_left, box_top), (box_right, box_bottom), status_color, -1)
+        cv2.rectangle(canvas_cv, (box_left, box_top), (box_right, box_bottom), (0,0,0), 2) # Black border (BGR)
 
+        # --- Convert to PIL for Text Rendering ---
+        # OpenCV is BGR, PIL is RGB. Convert color space.
+        canvas_pil = Image.fromarray(cv2.cvtColor(canvas_cv, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(canvas_pil)
+
+        # Draw Text for Plots
+        for i, ent in enumerate(entries):
+            top = pad + i * (plot_h + pad)
+            bottom = top + plot_h
+            name = ent['name']
+            
+            p_vmin, p_vmax = ent['p_vmin'], ent['p_vmax']
+            p_rmin, p_rmax = ent['p_rmin'], ent['p_rmax']
+            
+            # Use bold font for Total
+            f_title = font_title_bold if name == 'Total' else font_title
+            f_val = font_val_bold if name == 'Total' else font_val
+            
+            # Left axis labels (shifted slightly for larger font)
+            draw.text((4, top + 18), f'{int(p_vmax)}', font=font_axis, fill=(0, 0, 0))
+            draw.text((4, bottom - 12), f'{int(p_vmin)}', font=font_axis, fill=(0, 0, 0))
+            
+            # Right axis labels
+            draw.text((plot_w - right_margin + 2, top + 18), f'{int(p_rmax)}', font=font_axis, fill=(34, 139, 34))
+            draw.text((plot_w - right_margin + 2, bottom - 12), f'{int(p_rmin)}', font=font_axis, fill=(34, 139, 34))
+            
+            # Title (adjusted y)
+            title_y = top + 10
+            draw.text((left_margin - 10, title_y), name.title(), font=f_title, fill=(10, 10, 10))
+            
             # Current value + inline rate text
+            vals = ent['vals']
             cur = vals[-1] if vals else math.nan
             cur_text = str(int(cur)) if (not math.isnan(cur)) else 'NaN'
-            latest_rate_text = ''
+            
+            # Calculate Rate
+            latest_rate = 0.0
             try:
                 if ent['smoothed_rates']:
                     latest_s = ent['smoothed_rates'][-1]
                     if latest_s is not None and (not math.isnan(latest_s)):
-                        latest_rate_text = f' ({latest_s:.1f}/min)'
+                        latest_rate = latest_s
             except Exception:
-                latest_rate_text = ''
+                latest_rate = 0.0
+            
+            latest_rate_text = f' ({latest_rate:.1f}/min)' if latest_rate != 0 else ''
             display_text = f'{cur_text}{latest_rate_text}'
-            # Right-aligned current value + rate on single line; shrink to fit if needed
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            scale = 0.7
-            thickness = 2
-            max_text_width = win_w - right_margin - left_margin - 8
-            (tw, th), _ = cv2.getTextSize(display_text, font, scale, thickness)
-            min_scale = 0.35
-            while tw > max_text_width and scale > min_scale:
-                scale -= 0.05
-                (tw, th), _ = cv2.getTextSize(display_text, font, scale, thickness)
-            tx = max(left_margin, win_w - right_margin - tw - 6)
-            ty = top + 18
-            cv2.putText(canvas, display_text, (tx, ty), font, scale, (50, 150, 50), thickness, cv2.LINE_AA)
+            
+            # Right-aligned current value
+            bbox = draw.textbbox((0, 0), display_text, font=f_val)
+            tw = bbox[2] - bbox[0]
+            tx = max(left_margin, plot_w - right_margin - tw - 6)
+            ty = top + 12
+            draw.text((tx, ty), display_text, font=f_val, fill=(50, 150, 50))
+            
+            # --- Villager Stats Column ---
+            # Centered in the right margin area
+            col_center_x = plot_w - (right_margin // 2)
+            vill_count = int(ent['vill_count'])
+            
+            # Per-villager rate
+            per_vill_rate = 0.0
+            if vill_count > 0:
+                per_vill_rate = latest_rate / vill_count
+            
+            # Draw Villager Count
+            v_text = f"{vill_count} vills"
+            bbox = draw.textbbox((0, 0), v_text, font=font_vill_count)
+            tw = bbox[2] - bbox[0]
+            draw.text((col_center_x - tw // 2, top + 10), v_text, font=font_vill_count, fill=(0, 0, 0))
+            
+            # Draw Per-Vill Rate
+            r_text = f"{per_vill_rate:.1f}/min"
+            bbox = draw.textbbox((0, 0), r_text, font=font_vill_rate)
+            tw = bbox[2] - bbox[0]
+            draw.text((col_center_x - tw // 2, top + 30), r_text, font=font_vill_rate, fill=(100, 100, 100))
 
-        # elapsed time footer
+        # Draw Text for Villager Status
+        label_lines = ["VILLAGER", "PRODUCTION"]
+        status_text = "ACTIVE" if current_vill_status else "IDLE"
+        
+        y_cursor = box_top + 80
+        for line in label_lines:
+            bbox = draw.textbbox((0, 0), line, font=font_status_label)
+            tw = bbox[2] - bbox[0]
+            tx = box_left + (box_right - box_left - tw) // 2
+            draw.text((tx, y_cursor), line, font=font_status_label, fill=text_color_rgb)
+            y_cursor += 35
+            
+        y_cursor += 40
+        bbox = draw.textbbox((0, 0), status_text, font=font_status_val)
+        tw = bbox[2] - bbox[0]
+        tx = box_left + (box_right - box_left - tw) // 2
+        draw.text((tx, y_cursor), status_text, font=font_status_val, fill=text_color_rgb)
+
+        # Elapsed time footer
         elapsed = (datetime.now() - start_time).total_seconds()
-        cv2.putText(canvas, f'Elapsed: {int(elapsed)}s', (10, win_h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (50, 50, 50), 1, cv2.LINE_AA)
-        return canvas
+        draw.text((10, win_h - 15), f'Elapsed: {int(elapsed)}s', font=font_footer, fill=(50, 50, 50))
+
+        # Convert back to OpenCV (BGR)
+        return cv2.cvtColor(np.array(canvas_pil), cv2.COLOR_RGB2BGR)
 
     try:
         _LIVE_ANIMATION = True
         frame = 0
         while _LIVE_ANIMATION:
             try:
+                # Capture once
+                eco_summary = get_ss.get_bbox('eco_summary')
+                screenshot = get_ss.capture_gfn_screen_region(eco_summary)
+                
+                # Get resource counts
                 results = {}
                 try:
-                    results = summarize_eco()
+                    results = summarize_eco(screenshot=screenshot)
                 except Exception:
                     logging.exception('summarize_eco() failed')
                 _append_values(results)
+                
+                # Check villager production
+                try:
+                    current_vill_status = check_villager_production(screenshot, vill_kernel)
+                except Exception:
+                    current_vill_status = False
+                
                 canvas = render_frame()
                 try:
                     cv2.imshow(cv_win_name, canvas)
