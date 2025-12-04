@@ -36,6 +36,213 @@ _KERNELS_LOCK = threading.Lock()
 _MAX_WORKERS = max(2, min(8, (os.cpu_count() or 4)))
 _EX_DIGITS = None
 _EX_RESOURCES = None
+_CACHED_ANCHORS = None  # {name: (x, y)} relative to eco_summary
+
+
+def _parse_number_from_region(image, digit_kernels, out_path=None, name="debug"):
+    """Parse a number from an image using thresholding and contour analysis."""
+    # Threshold to isolate white text
+    thresh = analyze_ss.threshold_image(image, threshold=140)
+    
+    if out_path:
+        try:
+            os.makedirs(out_path, exist_ok=True)
+            Image.fromarray(thresh).save(os.path.join(out_path, f'{name}_thresh.png'))
+        except Exception:
+            pass
+    
+    # Find potential digit contours
+    bboxes = analyze_ss.find_digit_contours(thresh, min_h=8, max_h=30)
+    
+    if out_path:
+        # Draw contours on debug image
+        try:
+            debug_img = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+            for x, y, w, h in bboxes:
+                cv2.rectangle(debug_img, (x, y), (x+w, y+h), (0, 255, 0), 1)
+            Image.fromarray(debug_img).save(os.path.join(out_path, f'{name}_contours.png'))
+        except Exception:
+            pass
+    
+    if not bboxes:
+        return None
+        
+    # Match each bbox to a digit
+    digits = []
+    for x, y, w, h in bboxes:
+        # Extract digit ROI
+        roi = thresh[y:y+h, x:x+w]
+        
+        best_digit = -1
+        best_score = -1.0
+        
+        # Simple template matching against resized templates
+        # We need to resize the ROI to match the template size or vice versa.
+        # Since templates are fixed size, let's resize ROI to a standard height (e.g. 14px)
+        # and aspect ratio, then match?
+        # OR: Just run matchTemplate of the fixed templates against the ROI?
+        # The ROI might be tight, so matchTemplate might fail if template is larger.
+        # Better approach: Resize ROI to match template height, then correlation.
+        
+        # Actually, let's stick to the plan: "Match the candidate against 0-9 digit templates"
+        # Since we have the templates loaded in `digit_kernels`, let's use them.
+        # But `digit_kernels` are full images. `_DIGIT_KERNELS_GRAY` are numpy arrays.
+        
+        # Let's try a simpler approach for now:
+        # Resize ROI to a fixed size (e.g. 10x14) and match against resized templates?
+        # Or just use the existing `match_template_arrays` but on the small ROI?
+        
+        # Given the previous code used `match_template_arrays` on the whole image,
+        # let's try to match the template *inside* the ROI (padded).
+        
+        roi_padded = np.pad(roi, ((2, 2), (2, 2)), mode='constant')
+        
+        for d, k_gray in digit_kernels.items():
+            if k_gray is None:
+                continue
+            
+            # If template is larger than ROI, we can't match inside.
+            # But the digits should be roughly the same size.
+            
+            # Let's try resizing the template to the ROI height
+            # (assuming font size varies slightly but aspect ratio is const)
+            
+            # For simplicity in this first pass, let's just use the standard template matching
+            # on the *original* count image, but restricted to the bbox?
+            # No, that defeats the purpose of finding contours.
+            
+        # Pad the ROI to allow template matching without resizing distortion
+        # Templates likely have some padding or are of a specific size.
+        # We want to find the template *inside* the padded ROI (or centered on it).
+        
+        # Pad with 10 pixels of black (0)
+        roi_padded = np.pad(roi, ((10, 10), (10, 10)), mode='constant', constant_values=0)
+        
+        # Dilate the padded ROI slightly to thicken strokes (helps if template is thicker)
+        # kernel = np.ones((2, 2), np.uint8)
+        # roi_padded = cv2.dilate(roi_padded, kernel, iterations=1)
+        
+        # Try erosion?
+        kernel = np.ones((2, 2), np.uint8)
+        roi_padded = cv2.erode(roi_padded, kernel, iterations=1)
+        
+        for d, k_gray in digit_kernels.items():
+            if k_gray is None:
+                continue
+            
+            try:
+                # Check if template fits in padded ROI
+                ph, pw = roi_padded.shape
+                th, tw = k_gray.shape
+                
+                if th > ph or tw > pw:
+                    # Template is huge? Should not happen for digits.
+                    # If it does, we can't match it inside.
+                    continue
+                    
+                # Normalized correlation
+                res = cv2.matchTemplate(roi_padded.astype(np.float32), k_gray, cv2.TM_CCOEFF_NORMED)
+                score = res.max()
+                
+                if score > best_score:
+                    best_score = score
+                    best_digit = d
+            except Exception:
+                continue
+        
+        
+        if best_digit != -1 and best_score > 0.4: # Lower threshold slightly
+            # Store (x, digit) to sort and group later
+            digits.append((x, str(best_digit), w))
+            
+    if not digits:
+        return []
+        
+    # Sort by X coordinate
+    digits.sort(key=lambda t: t[0])
+    
+    # Group digits based on gap
+    groups = []
+    current_group = []
+    last_x_end = -1
+    
+    # Gap threshold: if gap > 12px, it's a new number
+    # (Typical digit width is ~8-10px, space is usually wider than a digit width)
+    GAP_THRESHOLD = 12 
+    
+    for x, d, w in digits:
+        if last_x_end != -1 and (x - last_x_end) > GAP_THRESHOLD:
+            # Start new group
+            if current_group:
+                groups.append("".join(current_group))
+            current_group = [d]
+        else:
+            current_group.append(d)
+        last_x_end = x + w
+        
+    if current_group:
+        groups.append("".join(current_group))
+        
+    return groups
+
+
+def _find_anchors(ss_gray, resource_kernels):
+    """Find resource icons in the screenshot with conflict resolution."""
+    candidates = []
+    
+    # Include silver and alternate templates in the search
+    resources = [
+        ('food', 'food_icon.png'),
+        ('wood', 'wood_icon.png'),
+        ('gold', 'gold_icon.png'),
+        ('stone', 'stone_icon.png'),
+        ('silver', 'silver_icon_macedonia.png'), # Silver only exists in this variant for now
+        
+        # Alternate templates for "Macedonia" / low-quality screenshots
+        ('food', 'food_icon_macedonia.png'),
+        ('wood', 'wood_icon_macedonia.png'),
+        ('stone', 'stone_icon_macedonia.png'),
+    ]
+    
+    for name, fname in resources:
+        k_gray = resource_kernels.get(fname)
+        if k_gray is None:
+            continue
+            
+        res_conv = analyze_ss.match_template_arrays(ss_gray, k_gray)
+        found, peaks = analyze_ss.is_target_in_ss(res_conv, None, return_peaks=True, threshold=0.6)
+        
+        if found and peaks:
+            for x, y, score in peaks:
+                candidates.append({'name': name, 'score': score, 'x': int(x), 'y': int(y)})
+                
+    # Sort by score descending
+    candidates.sort(key=lambda c: c['score'], reverse=True)
+    
+    anchors = {}
+    occupied_positions = []
+    
+    min_dist = 10 # Minimum distance between distinct icons
+    
+    for c in candidates:
+        # Check if this position is already occupied by a better match
+        is_occupied = False
+        for ox, oy in occupied_positions:
+            dist = math.hypot(c['x'] - ox, c['y'] - oy)
+            if dist < min_dist:
+                is_occupied = True
+                break
+        
+        if not is_occupied:
+            # This is a new valid anchor
+            # Check if we already have this resource (e.g. found twice?)
+            # Usually we only expect one of each, but maybe not?
+            # For now, let's assume one of each.
+            if c['name'] not in anchors:
+                anchors[c['name']] = (c['x'], c['y'])
+                occupied_positions.append((c['x'], c['y']))
+            
+    return anchors
 
 
 def _init_kernels_and_executors(resources):
@@ -170,17 +377,21 @@ def are_vills_producing():
         cv2.destroyAllWindows()
 
 
-def summarize_eco():
+def summarize_eco(screenshot=None, out_path=None):
     """Capture the eco_summary region and extract resource counts.
 
     Returns a dict: {'gold': '100', 'food': '20', 'stone': '0', 'wood': '200'} or None values.
     """
-    logging.info('summarize_eco: entering')
+    global _CACHED_ANCHORS
+    
+    # logging.info('summarize_eco: entering')
     eco_summary = get_ss.get_bbox('eco_summary')
-    logging.info('summarize_eco: eco_summary bbox=%s', eco_summary)
-    screenshot = get_ss.capture_gfn_screen_region(eco_summary)
+    # logging.info('summarize_eco: eco_summary bbox=%s', eco_summary)
+    
+    if screenshot is None:
+        screenshot = get_ss.capture_gfn_screen_region(eco_summary)
 
-    out_path = None
+    # out_path = None  <-- Removed this line as it's now an argument
     # Allow kernel path to be overridden with env var AOE_KERNEL_PATH
     kernelPath = _KERNEL_PATH
 
@@ -189,136 +400,92 @@ def summarize_eco():
         ('wood', 'wood_icon.png'),
         ('gold', 'gold_icon.png'),
         ('stone', 'stone_icon.png'),
+        ('silver', 'silver_icon_macedonia.png'),
+        ('food', 'food_icon_macedonia.png'),
+        ('wood', 'wood_icon_macedonia.png'),
+        ('stone', 'stone_icon_macedonia.png'),
     ]
 
     results = {}
-    eco_summary_bbox = eco_summary
     fudge_factor = 10
-
-    # Initialize module-level caches and shared executors (idempotent)
+    
+    # Initialize module-level caches
     _init_kernels_and_executors(resources)
-    resource_kernels = _RESOURCE_KERNELS
     resource_kernels_gray = _RESOURCE_KERNELS_GRAY
     digit_kernels_gray = _DIGIT_KERNELS_GRAY
-    ex_digits = _EX_DIGITS
-    ex_resources = _EX_RESOURCES
-
-    # Precompute screenshot grayscale array once and reuse in workers
+    
     ss_gray = np.array(screenshot.convert('L'), dtype=np.float32)
-
-    def process_resource(res_name: str, icon_fname: str):
-        # Use precomputed grayscale kernel array to avoid PIL->numpy each call
-        k_gray = resource_kernels_gray.get(icon_fname)
+    
+    # 1. Dynamic Anchoring
+    if _CACHED_ANCHORS is None:
+        logging.info("Finding anchors...")
+        _CACHED_ANCHORS = _find_anchors(ss_gray, resource_kernels_gray)
+        logging.info("Found anchors: %s", _CACHED_ANCHORS)
+        
+    # If we still don't have anchors (e.g. black screen), we can't do anything
+    if not _CACHED_ANCHORS:
+        return {r[0]: None for r in resources}
+        
+    # 2. Extract and Parse Counts
+    for name, fname in resources:
+        anchor = _CACHED_ANCHORS.get(name)
+        if not anchor:
+            results[name] = None
+            continue
+            
+        ax, ay = anchor
+        # Get icon size
+        k_gray = resource_kernels_gray.get(fname)
         if k_gray is None:
-            return None
-        res_conv = analyze_ss.match_template_arrays(ss_gray, k_gray, out_path=out_path)
-        found, peaks = analyze_ss.is_target_in_ss(res_conv, k_gray, out_path=out_path, return_peaks=True)
-        if not found or not peaks:
-            return None
-        peak_x, peak_y, peak_score = peaks[0]
-        top = eco_summary_bbox['top'] + int(peak_y)
-        left = eco_summary_bbox['left'] + int(peak_x)
-        # kernel array shape is (h, w)
-        kh = k_gray.shape[0]
-        kw = k_gray.shape[1]
-        icon_w, icon_h = kw, kh
-        count_width = 100
-        count_bbox = {
-            'top': int(top - fudge_factor),
-            'left': int(left + icon_w + 2),
-            'width': int(count_width),
-            'height': int(icon_h + fudge_factor * 2)
-        }
+            results[name] = None
+            continue
+            
+        h, w = k_gray.shape
+        
+        # Define count region (right of icon)
+        # Adjust these offsets based on the screenshot analysis if needed
+        # Previous code used: top = ay, left = ax + w + 2
+        count_left = ax + w - 3  # Shift left slightly to catch leading digits
+        count_top = ay - fudge_factor
+        count_w = 100
+        count_h = h + fudge_factor * 2
+        
+        # Ensure bounds
+        sh, sw = ss_gray.shape
+        count_left = max(0, min(sw - 1, count_left))
+        count_top = max(0, min(sh - 1, count_top))
+        count_right = min(sw, count_left + count_w)
+        count_bottom = min(sh, count_top + count_h)
+        
+        if count_right <= count_left or count_bottom <= count_top:
+            results[name] = None
+            continue
+            
+        # Extract region from the ALREADY captured screenshot (converted to PIL Image for helper)
+        # We have ss_gray (numpy), but helper takes PIL Image for thresholding (or we can adapt helper)
+        # Helper `_parse_number_from_region` calls `analyze_ss.threshold_image` which takes PIL Image.
+        # Let's crop from the original PIL screenshot.
+        
         try:
-            count_img = get_ss.capture_gfn_screen_region(count_bbox, out_path=out_path)
-        except Exception:
-            return None
-        count_img_gray = np.array(count_img.convert('L'), dtype=np.float32)
-
-        per_digit_min_distance = 5
-        futures_digits = []
-        all_digit_peaks = []
-
-        def detect_digit_worker(dd: int):
-            dk = digit_kernels_gray.get(dd)
-            if dk is None:
-                return []
-            conv_local = analyze_ss.match_template_arrays(count_img_gray, dk, out_path=out_path)
-            found_d, peaks_d = analyze_ss.is_target_in_ss(conv_local, None, out_path=out_path, return_peaks=True, min_distance=per_digit_min_distance)
-            if not found_d:
-                return []
-            return [(int(px), int(dd), float(pscore)) for (px, py, pscore) in peaks_d]
-
-        # Submit digit detection to shared executor (if available)
-        if ex_digits is not None:
-            for d in range(10):
-                if digit_kernels_gray.get(d) is None:
-                    continue
-                futures_digits.append(ex_digits.submit(detect_digit_worker, d))
-        else:
-            # fallback: run sequentially and collect results immediately
-            for d in range(10):
-                if digit_kernels_gray.get(d) is None:
-                    continue
-                try:
-                    res_list = detect_digit_worker(d)
-                    if res_list:
-                        all_digit_peaks.extend(res_list)
-                except Exception:
-                    continue
-            # since we've already processed synchronously, skip the futures loop
-            if all_digit_peaks:
-                all_digit_peaks.sort(key=lambda t: t[0])
-                assembled = ''.join(str(int(d)) for (_, d, _) in all_digit_peaks)
-                return assembled
-
-        for f in futures.as_completed(futures_digits):
-            try:
-                res_list = f.result()
-                if res_list:
-                    all_digit_peaks.extend(res_list)
-            except Exception:
-                continue
-
-        if not all_digit_peaks:
-            return None
-        all_digit_peaks.sort(key=lambda t: t[0])
-        assembled = ''.join(str(int(d)) for (_, d, _) in all_digit_peaks)
-        return assembled
-
-    future_to_res = {}
-    try:
-        logging.info('Submitting %d resource tasks...', len(resources))
-        if ex_resources is not None:
-            future_to_res = {ex_resources.submit(process_resource, name, fname): (name, fname) for name, fname in resources}
-            for fut in futures.as_completed(future_to_res):
-                name, _ = future_to_res[fut]
-                try:
-                    val = fut.result()
-                    results[name] = val
-                except Exception:
-                    logging.exception('Error processing resource %s', name)
-                    results[name] = None
-        else:
-            # fallback to sequential processing
-            for name, fname in resources:
-                try:
-                    results[name] = process_resource(name, fname)
-                except Exception:
-                    logging.exception('Error processing resource %s sequentially', name)
-                    results[name] = None
-    except Exception:
-        logging.exception('Parallel submission failed; running sequentially')
-        for name, fname in resources:
-            try:
-                val = process_resource(name, fname)
-                results[name] = val
-            except Exception:
-                logging.exception('Sequential processing failed for %s', name)
+            count_img = screenshot.crop((count_left, count_top, count_right, count_bottom))
+            val_groups = _parse_number_from_region(count_img, digit_kernels_gray, out_path=out_path, name=name)
+            
+            if val_groups:
+                results[name] = val_groups[0]
+                if name == 'silver':
+                    results[f'{name}_vills'] = None
+                elif len(val_groups) > 1:
+                    results[f'{name}_vills'] = val_groups[1]
+                else:
+                    results[f'{name}_vills'] = None
+            else:
                 results[name] = None
-    finally:
-        # Do not shutdown shared executors here; they are global and cleaned up at exit.
-        pass
+                results[f'{name}_vills'] = None
+                
+        except Exception:
+            logging.exception("Error parsing %s", name)
+            results[name] = None
+            results[f'{name}_vills'] = None
 
     return results
 

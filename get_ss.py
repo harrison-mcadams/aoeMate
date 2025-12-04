@@ -48,7 +48,7 @@ def capture_gfn_screen_region(bbox, *, out_path: Optional[str] = None):
         # If an output path was provided, save the image there; otherwise do not write
         if out_path:
             try:
-                out_p = Path(out_path+'ss.png')
+                out_p = Path(out_path)
                 out_p.parent.mkdir(parents=True, exist_ok=True)
                 img.save(str(out_p))
             except Exception as e:

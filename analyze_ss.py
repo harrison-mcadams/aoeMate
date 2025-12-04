@@ -202,6 +202,30 @@ def is_target_in_ss(res: np.ndarray, target: Image.Image = None, *, out_path: Op
     return found
 
 
+def threshold_image(image: Image.Image, threshold: int = 180) -> np.ndarray:
+    """Convert image to grayscale and apply binary thresholding."""
+    gray = np.array(image.convert('L'), dtype=np.uint8)
+    _, thresh = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+    return thresh
+
+
+def find_digit_contours(binary_image: np.ndarray, min_h: int = 8, max_h: int = 30) -> List[Tuple[int, int, int, int]]:
+    """Find contours that might be digits.
+    
+    Returns list of bounding boxes (x, y, w, h) sorted by x coordinate.
+    """
+    contours, _ = cv2.findContours(binary_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    digit_bboxes = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if min_h <= h <= max_h:
+            digit_bboxes.append((x, y, w, h))
+    
+    # Sort by x coordinate to read left-to-right
+    digit_bboxes.sort(key=lambda b: b[0])
+    return digit_bboxes
+
+
 if __name__ == "__main__":
     # Simple demo (does not alter library behavior): run matching on example files
     from PIL import Image
