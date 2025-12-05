@@ -123,8 +123,8 @@ def _parse_number_from_region(image, digit_kernels, out_path=None, name="debug")
         # roi_padded = cv2.dilate(roi_padded, kernel, iterations=1)
         
         # Try erosion?
-        kernel = np.ones((2, 2), np.uint8)
-        roi_padded = cv2.erode(roi_padded, kernel, iterations=1)
+        # kernel = np.ones((2, 2), np.uint8)
+        # roi_padded = cv2.erode(roi_padded, kernel, iterations=1)
         
         for d, k_gray in digit_kernels.items():
             if k_gray is None:
@@ -455,50 +455,126 @@ def summarize_eco(screenshot=None, out_path=None):
             
         h, w = k_gray.shape
         
-        # Define count region (right of icon)
-        # Adjust these offsets based on the screenshot analysis if needed
-        # Previous code used: top = ay, left = ax + w + 2
-        count_left = ax + w - 3  # Shift left slightly to catch leading digits
-        count_top = ay - fudge_factor
-        count_w = 100
-        count_h = h + fudge_factor * 2
+        # Define separate regions for Resource Count and Villager Count
+        # We use the "villager separator" icon (person standing) as the delimiter.
+        # It was found at offset ~90px from the resource icon right edge.
+        
+        # 1. Search for Separator
+        # Look in a strip where we expect it: [ax+w+70, ax+w+110]
+        # Widen search to ensure we catch it
+        sep_search_left = ax + w + 60
+        sep_search_top = ay - 4
+        sep_search_w = 60
+        sep_search_h = h + 8
         
         # Ensure bounds
         sh, sw = ss_gray.shape
-        count_left = max(0, min(sw - 1, count_left))
-        count_top = max(0, min(sh - 1, count_top))
-        count_right = min(sw, count_left + count_w)
-        count_bottom = min(sh, count_top + count_h)
+        sep_search_left = max(0, min(sw - 1, sep_search_left))
+        sep_search_top = max(0, min(sh - 1, sep_search_top))
+        sep_search_right = min(sw, sep_search_left + sep_search_w)
+        sep_search_bottom = min(sh, sep_search_top + sep_search_h)
         
-        if count_right <= count_left or count_bottom <= count_top:
+        separator_found = False
+        sep_x_rel = 0 # Relative to search strip
+        sep_w_found = 0
+        
+        if sep_search_right > sep_search_left and sep_search_bottom > sep_search_top:
+            try:
+                sep_strip = ss_gray[sep_search_top:sep_search_bottom, sep_search_left:sep_search_right]
+                # Match template
+                # We need to load it first. It's not in the main dict yet.
+                # Ideally we load it in _init_kernels. For now, let's lazy load or assume it's loaded.
+                # Let's add it to _RESOURCE_KERNELS_GRAY if not present.
+                if 'villager_separator.png' not in resource_kernels_gray:
+                     try:
+                        kimg = Image.open(os.path.join(_KERNEL_PATH, 'villager_separator.png'))
+                        resource_kernels_gray['villager_separator.png'] = np.array(kimg.convert('L'), dtype=np.float32)
+                     except:
+                        pass
+                
+                k_sep = resource_kernels_gray.get('villager_separator.png')
+                if k_sep is not None:
+                    res_conv = analyze_ss.match_template_arrays(sep_strip, k_sep)
+                    found, peaks = analyze_ss.is_target_in_ss(res_conv, None, return_peaks=True, threshold=0.6)
+                    if found and peaks:
+                        # Take the best match
+                        peaks.sort(key=lambda p: p[2], reverse=True)
+                        px, py, _ = peaks[0]
+                        separator_found = True
+                        sep_x_rel = int(px)
+                        sep_w_found = k_sep.shape[1]
+            except Exception:
+                pass
+
+        # 2. Define ROIs based on Separator or Fallback
+        if separator_found:
+            # Separator absolute X
+            sep_abs_x = sep_search_left + sep_x_rel
+            
+            # Resource ROI: Ends before separator
+            res_roi_left = ax + w - 5
+            res_roi_right = sep_abs_x - 2 # Padding
+            res_roi_top = ay - fudge_factor
+            res_roi_bottom = ay + h + fudge_factor
+            
+            # Villager ROI: Starts after separator
+            vill_roi_left = sep_abs_x + sep_w_found + 2 # Padding
+            vill_roi_right = vill_roi_left + 50 # Assume max width
+            vill_roi_top = ay - fudge_factor
+            vill_roi_bottom = ay + h + fudge_factor
+            
+        else:
+            # Fallback to hardcoded offsets (from previous step)
+            res_roi_left = ax + w - 5 
+            res_roi_top = ay - fudge_factor
+            res_roi_w = 75 
+            res_roi_h = h + fudge_factor * 2
+            res_roi_right = res_roi_left + res_roi_w
+            res_roi_bottom = res_roi_top + res_roi_h
+            
+            vill_roi_left = ax + w + 80 
+            vill_roi_top = ay - fudge_factor
+            vill_roi_w = 50 
+            vill_roi_h = h + fudge_factor * 2
+            vill_roi_right = vill_roi_left + vill_roi_w
+            vill_roi_bottom = vill_roi_top + vill_roi_h
+        
+        # Ensure bounds for Resource ROI
+        res_roi_left = max(0, min(sw - 1, res_roi_left))
+        res_roi_top = max(0, min(sh - 1, res_roi_top))
+        res_roi_right = min(sw, res_roi_right)
+        res_roi_bottom = min(sh, res_roi_bottom)
+        
+        # Extract Resource Count
+        if res_roi_right > res_roi_left and res_roi_bottom > res_roi_top:
+            try:
+                res_img = screenshot.crop((res_roi_left, res_roi_top, res_roi_right, res_roi_bottom))
+                val_groups = _parse_number_from_region(res_img, digit_kernels_gray, out_path=out_path, name=f"{name}_res")
+                results[name] = val_groups[0] if val_groups else None
+            except Exception:
+                results[name] = None
+        else:
             results[name] = None
-            continue
+
+        # Extract Villager Count (Skip for Silver)
+        if name == 'silver':
+            results[f'{name}_vills'] = None
+        else:
+            # Ensure bounds for Villager ROI
+            vill_roi_left = max(0, min(sw - 1, vill_roi_left))
+            vill_roi_top = max(0, min(sh - 1, vill_roi_top))
+            vill_roi_right = min(sw, vill_roi_right)
+            vill_roi_bottom = min(sh, vill_roi_bottom)
             
-        # Extract region from the ALREADY captured screenshot (converted to PIL Image for helper)
-        # We have ss_gray (numpy), but helper takes PIL Image for thresholding (or we can adapt helper)
-        # Helper `_parse_number_from_region` calls `analyze_ss.threshold_image` which takes PIL Image.
-        # Let's crop from the original PIL screenshot.
-        
-        try:
-            count_img = screenshot.crop((count_left, count_top, count_right, count_bottom))
-            val_groups = _parse_number_from_region(count_img, digit_kernels_gray, out_path=out_path, name=name)
-            
-            if val_groups:
-                results[name] = val_groups[0]
-                if name == 'silver':
-                    results[f'{name}_vills'] = None
-                elif len(val_groups) > 1:
-                    results[f'{name}_vills'] = val_groups[1]
-                else:
+            if vill_roi_right > vill_roi_left and vill_roi_bottom > vill_roi_top:
+                try:
+                    vill_img = screenshot.crop((vill_roi_left, vill_roi_top, vill_roi_right, vill_roi_bottom))
+                    val_groups_v = _parse_number_from_region(vill_img, digit_kernels_gray, out_path=out_path, name=f"{name}_vill")
+                    results[f'{name}_vills'] = val_groups_v[0] if val_groups_v else None
+                except Exception:
                     results[f'{name}_vills'] = None
             else:
-                results[name] = None
                 results[f'{name}_vills'] = None
-                
-        except Exception:
-            logging.exception("Error parsing %s", name)
-            results[name] = None
-            results[f'{name}_vills'] = None
 
     return results
 
