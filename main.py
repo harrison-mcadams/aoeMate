@@ -193,8 +193,10 @@ def _find_anchors(ss_gray, resource_kernels):
             # Usually we only expect one of each, but maybe not?
             # For now, let's assume one of each.
             if c['name'] not in anchors:
-                anchors[c['name']] = (c['x'], c['y'])
-                occupied_positions.append((c['x'], c['y']))
+                # Sanity check: Resource icons should be on the left side
+                if c['x'] < 100:
+                    anchors[c['name']] = (c['x'], c['y'])
+                    occupied_positions.append((c['x'], c['y']))
             
     return anchors
 
@@ -558,8 +560,10 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
 
     sw = int(os.environ.get('AOEMATE_SCREEN_W', '1280'))
     sh = int(os.environ.get('AOEMATE_SCREEN_H', '800'))
-    win_w = int(os.environ.get('AOEMATE_WIN_W', str(min(1000, int(sw * 0.6)))))
-    win_h = int(os.environ.get('AOEMATE_WIN_H', str(min(900, int(sh * 0.6)))))
+    # Increase default size (User requested 100% bigger)
+    # Let's target ~1200x1000 or larger if screen permits
+    win_w = int(os.environ.get('AOEMATE_WIN_W', str(min(1600, int(sw * 0.9)))))
+    win_h = int(os.environ.get('AOEMATE_WIN_H', str(min(1200, int(sh * 0.9)))))
 
     cv_win_name = 'AOEMatePlot'
     try:
@@ -694,34 +698,48 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         font_status_val = ImageFont.load_default()
         font_footer = ImageFont.load_default()
 
-    def render_frame():
+    def render_frame(current_w=None, current_h=None):
+        # Use current window dimensions if provided, else default
+        w = current_w if current_w else win_w
+        h = current_h if current_h else win_h
+        
         # Increase whitespace & margins for a more spacious look
         # Split layout: Left 70% for plots, Right 30% for Villager Status
         
         # Create canvas in OpenCV (BGR) for drawing lines/rectangles
-        canvas_cv = 255 * np.ones((win_h, win_w, 3), dtype=np.uint8)
+        canvas_cv = 255 * np.ones((h, w, 3), dtype=np.uint8)
         
         # Define areas
-        split_x = int(win_w * 0.7)
+        split_x = int(w * 0.7)
         
         # --- Left Side: Resource Plots ---
         pad = 12
         left_margin = 80
-        # Increased right margin to accommodate villager stats column
-        right_margin = 140 # relative to split_x
+        # Increased right margin to separate axis labels from summary text
+        right_margin = 220 
         
         plot_w = split_x
         
         # Add "Total" to the list of things to plot locally
-        plot_names = resource_names + ['Total']
-        plot_h = (win_h - (len(plot_names) + 1) * pad) // len(plot_names)
+        # Dynamic: Only show resources that have been detected in anchors
+        # This allows flexible support for civs with/without Silver
+        active_resources = []
+        if _CACHED_ANCHORS:
+            active_resources = [r for r in resource_names if r in _CACHED_ANCHORS]
+        
+        # Fallback if no anchors yet (or something went wrong), show core 4
+        if not active_resources:
+             active_resources = ['food', 'wood', 'gold', 'stone']
+             
+        plot_names = active_resources + ['Total']
+        plot_h = (h - (len(plot_names) + 1) * pad) // len(plot_names)
 
-        # First pass: compute plotting primitives and smoothed rates for each resource
+        # First pass: compute plotting primitives... (unchanged)
         entries = []  # list of dicts with drawing info per resource
         global_vals = []
         global_rates = []
         
-        # Calculate Total Data
+        # Calculate Total Data (unchanged)
         total_vals = []
         if len(times) > 0:
             n_points = len(times)
@@ -743,8 +761,6 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         for i, r in enumerate(plot_names):
             if r == 'Total':
                 vals = total_vals
-                # For Total, we can sum villager counts if we want, or just leave it blank
-                # Let's try to sum them for completeness
                 current_vill_count = 0
                 for rn in resource_names:
                     v_list = vill_data.get(rn, [])
@@ -754,7 +770,6 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                             current_vill_count += last_v
             else:
                 vals = data.get(r, [])
-                # Get current villager count
                 v_list = vill_data.get(r, [])
                 current_vill_count = v_list[-1] if v_list else 0
                 if current_vill_count is None or (isinstance(current_vill_count, float) and math.isnan(current_vill_count)):
@@ -762,6 +777,26 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                 
             n = len(vals)
             xs = np.linspace(left_margin, plot_w - right_margin, n) if n > 0 else np.array([])
+
+            # Rate Calculation (unchanged)...
+            smoothed_rates = []
+            if n >= 2 and len(times) >= 2:
+                # ... (same rate logic) ...
+                # Copying rate logic for brevity in replacement, assuming it's unchanged
+                # Actually I need to include it or the replace will fail if I skip lines.
+                # I'll try to match the context carefully.
+                # Since I'm replacing a large block, I should be careful.
+                # Let's just update the drawing part mostly.
+                pass 
+
+            # ... (skipping rate calc lines for now, will target drawing loop) ...
+
+        # Let's target the Second Pass loop where drawing happens
+        
+        # ...
+
+    # I will target the drawing loop specifically
+
 
             # --- New Rate Calculation: Cumulative Positive Flow ---
             # 1. Calculate diffs, ignoring negatives (spending)
@@ -921,16 +956,19 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
             
             base_color = COLORS.get(name, (0, 0, 0))
             
+            # Draw Gridlines (Faint Grey)
+            grid_color = (220, 220, 220)
+            for ratio in [0.25, 0.5, 0.75]:
+                y_grid = int(top + (plot_h - 20) * ratio) + 10
+                cv2.line(canvas_cv, (left_margin, y_grid), (plot_w - right_margin, y_grid), grid_color, 1)
+
             # Plot resource totals (Raw Count) -> Solid Thick Line
             pts = []
             vrange = p_vmax - p_vmin if p_vmax != p_vmin else 1.0
             for k in range(n):
                 val = vals[k]
                 if math.isnan(val):
-                    continue # Skip NaNs for continuous line? Or break? 
-                    # If we skip, it connects across gaps. If we want gaps, we need multiple polylines.
-                    # For now, let's just skip to connect.
-                
+                    continue
                 y = int(top + (plot_h - 20) * (1.0 - (float(val) - p_vmin) / vrange)) + 10
                 x = int(xs[k])
                 pts.append((x, y))
@@ -939,7 +977,6 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                 pts_arr = np.array(pts, dtype=np.int32)
                 thickness = 3 if name == 'Total' else 2
                 cv2.polylines(canvas_cv, [pts_arr], False, base_color, thickness, lineType=cv2.LINE_AA)
-                # Removed circles (symbols)
             
             # Store scale for text rendering
             ent['p_vmin'] = p_vmin
@@ -948,7 +985,7 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
             ent['p_rmax'] = p_rmax
             ent['color'] = base_color # Store for text
 
-            # Plot smoothed rate on right axis -> Dashed/Dotted Line
+            # Plot smoothed rate on right axis -> Thin Solid Line
             srates = ent['smoothed_rates']
             if srates:
                 rrange = p_rmax - p_rmin if p_rmax != p_rmin else 1.0
@@ -974,9 +1011,9 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         
         box_margin = 20
         box_left = split_x + box_margin
-        box_right = win_w - box_margin
+        box_right = w - box_margin
         box_top = box_margin
-        box_bottom = win_h - box_margin
+        box_bottom = h - box_margin
         
         cv2.rectangle(canvas_cv, (box_left, box_top), (box_right, box_bottom), status_color, -1)
         cv2.rectangle(canvas_cv, (box_left, box_top), (box_right, box_bottom), (0,0,0), 2) # Black border (BGR)
@@ -1003,20 +1040,37 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
             f_title = font_title_bold if name == 'Total' else font_title
             f_val = font_val_bold if name == 'Total' else font_val
             
-            # Left axis labels (shifted slightly for larger font)
-            draw.text((4, top + 18), f'{int(p_vmax)}', font=font_axis, fill=(0, 0, 0))
-            draw.text((4, bottom - 12), f'{int(p_vmin)}', font=font_axis, fill=(0, 0, 0))
+            # Left Axis Labels (Right-aligned in left margin)
+            # Margin is 80px. Align to x=75.
+            vmax_str = f'{int(p_vmax)}'
+            vmin_str = f'{int(p_vmin)}'
             
-            # Right axis labels
-            draw.text((plot_w - right_margin + 2, top + 18), f'{int(p_rmax)}', font=font_axis, fill=rgb_title)
-            draw.text((plot_w - right_margin + 2, bottom - 12), f'{int(p_rmin)}', font=font_axis, fill=rgb_title)
+            bbox = draw.textbbox((0, 0), vmax_str, font=font_axis)
+            tw = bbox[2] - bbox[0]
+            draw.text((75 - tw, top + 18), vmax_str, font=font_axis, fill=(0, 0, 0))
             
-            # Title (adjusted y)
+            bbox = draw.textbbox((0, 0), vmin_str, font=font_axis)
+            tw = bbox[2] - bbox[0]
+            draw.text((75 - tw, bottom - 12), vmin_str, font=font_axis, fill=(0, 0, 0))
+            
+            # Right Axis Labels (Left-aligned next to plot)
+            # Plot ends at plot_w - right_margin. Draw at +5px.
+            rx = plot_w - right_margin + 5
+            draw.text((rx, top + 18), f'{int(p_rmax)}', font=font_axis, fill=rgb_title)
+            draw.text((rx, bottom - 12), f'{int(p_rmin)}', font=font_axis, fill=rgb_title)
+            
+            # Title (Left-aligned in left margin, above axis labels?)
+            # Or inside plot? Let's put it at x=10 in left margin.
             title_y = top + 10
-            draw.text((left_margin - 10, title_y), name.title(), font=f_title, fill=rgb_title)
+            draw.text((10, title_y), name.title(), font=f_title, fill=rgb_title)
             
-            # --- Summary Data (Centered in Right Margin) ---
-            col_center_x = plot_w - (right_margin // 2)
+            # --- Summary Data (Centered in remaining Right Margin) ---
+            # Right margin starts at `plot_w - right_margin`.
+            # Axis labels take ~40px.
+            # Summary area: [plot_w - right_margin + 50, plot_w]
+            summary_start = plot_w - right_margin + 50
+            summary_width = right_margin - 50
+            col_center_x = summary_start + (summary_width // 2)
             
             # 1. Resource Count & Rate
             vals = ent['vals']
@@ -1100,7 +1154,19 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                 except Exception:
                     current_vill_status = False
                 
-                canvas = render_frame()
+                # Get current window size for responsive layout
+                try:
+                    rect = cv2.getWindowImageRect(cv_win_name)
+                    # rect is (x, y, w, h)
+                    # Note: getWindowImageRect might return -1 if window is closed or not ready
+                    if rect and rect[2] > 0 and rect[3] > 0:
+                        cur_w, cur_h = rect[2], rect[3]
+                    else:
+                        cur_w, cur_h = win_w, win_h
+                except Exception:
+                    cur_w, cur_h = win_w, win_h
+
+                canvas = render_frame(cur_w, cur_h)
                 try:
                     cv2.imshow(cv_win_name, canvas)
                 except Exception:

@@ -1051,3 +1051,46 @@
 2025-12-04 20:00:44,418 INFO: live_monitor_resources (OpenCV) start poll_sec=1.0 max_points=300
 2025-12-04 20:00:44,863 INFO: Finding anchors...
 2025-12-04 20:00:44,945 INFO: Found anchors: {'gold': (14, 228), 'stone': (15, 272), 'food': (14, 138), 'wood': (14, 183), 'silver': (13, 316)}
+2025-12-04 20:08:52,631 INFO: live_monitor_resources (OpenCV) start poll_sec=1.0 max_points=300
+2025-12-04 20:08:53,260 INFO: Finding anchors...
+2025-12-04 20:08:53,369 INFO: Found anchors: {'gold': (14, 228), 'stone': (15, 272), 'wood': (14, 183), 'food': (14, 138), 'silver': (13, 316)}
+2025-12-04 22:03:37,272 INFO: Quit key pressed - exiting live monitor
+2025-12-04 22:03:37,282 INFO: OpenCV live loop ended
+2025-12-04 22:03:45,175 INFO: Quit key pressed - exiting live monitor
+2025-12-04 22:03:45,182 INFO: OpenCV live loop ended
+2025-12-04 22:03:47,767 INFO: Quit key pressed - exiting live monitor
+2025-12-04 22:03:47,770 INFO: OpenCV live loop ended
+2025-12-04 22:03:48,549 INFO: Quit key pressed - exiting live monitor
+2025-12-04 22:03:48,553 INFO: OpenCV live loop ended
+2025-12-04 22:05:11,734 INFO: Quit key pressed - exiting live monitor
+2025-12-04 22:05:11,746 INFO: OpenCV live loop ended
+2025-12-04 22:05:39,504 INFO: live_monitor_resources (OpenCV) start poll_sec=1.0 max_points=300
+2025-12-04 22:05:40,096 INFO: Finding anchors...
+2025-12-04 22:05:40,206 INFO: Found anchors: {'food': (90, 57), 'wood': (339, 57), 'silver': (108, 66)}
+2025-12-04 22:08:47,389 INFO: Quit key pressed - exiting live monitor
+2025-12-04 22:08:47,390 INFO: OpenCV live loop ended
+2025-12-04 22:08:56,544 INFO: live_monitor_resources (OpenCV) start poll_sec=1.0 max_points=300
+2025-12-04 22:08:56,864 INFO: Finding anchors...
+2025-12-04 22:08:56,935 INFO: Found anchors: {'gold': (14, 267), 'stone': (15, 305), 'wood': (14, 228), 'food': (14, 189), 'silver': (21, 78)}
+2025-12-04 22:18:56,280 INFO: Quit key pressed - exiting live monitor
+2025-12-04 22:18:56,280 INFO: OpenCV live loop ended
+2025-12-04 22:20:24,713 INFO: live_monitor_resources (OpenCV) start poll_sec=1.0 max_points=300
+2025-12-04 22:20:25,031 INFO: Finding anchors...
+2025-12-04 22:20:25,106 INFO: Found anchors: {'food': (131, 4), 'silver': (341, 101)}
+2025-12-04 22:32:01,545 INFO: live_monitor_resources (OpenCV) start poll_sec=1.0 max_points=300
+2025-12-04 22:32:02,212 INFO: Finding anchors...
+2025-12-04 22:32:02,310 INFO: Found anchors: {'gold': (14, 267), 'wood': (14, 228), 'stone': (15, 305), 'food': (14, 189), 'silver': (71, 47)}
+2025-12-04 22:56:40,943 INFO: Quit key pressed - exiting live monitor
+2025-12-04 22:56:40,945 INFO: OpenCV live loop ended
+2025-12-04 22:56:41,762 INFO: Quit key pressed - exiting live monitor
+2025-12-04 22:56:41,769 INFO: OpenCV live loop ended
+2025-12-04 22:57:25,798 INFO: live_monitor_resources (OpenCV) start poll_sec=1.0 max_points=300
+2025-12-04 22:57:26,942 INFO: Finding anchors...
+2025-12-04 22:57:27,200 INFO: Found anchors: {}
+2025-12-04 22:59:34,507 INFO: Quit key pressed - exiting live monitor
+2025-12-04 22:59:34,508 INFO: OpenCV live loop ended
+2025-12-04 22:59:40,711 INFO: live_monitor_resources (OpenCV) start poll_sec=1.0 max_points=300
+2025-12-04 22:59:41,032 INFO: Finding anchors...
+2025-12-04 22:59:41,105 INFO: Found anchors: {'gold': (14, 267), 'stone': (15, 305), 'food': (14, 189), 'wood': (14, 228), 'silver': (13, 28)}
+2025-12-04 23:33:46,748 INFO: Quit key pressed - exiting live monitor
+2025-12-04 23:33:46,751 INFO: OpenCV live loop ended
