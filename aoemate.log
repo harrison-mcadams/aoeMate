@@ -1100,3 +1100,33 @@
 2025-12-05 10:28:43,590 INFO: Game Paused (No resources detected)
 2025-12-05 10:28:55,748 INFO: Quit key pressed - exiting live monitor
 2025-12-05 10:28:55,749 INFO: OpenCV live loop ended
+2025-12-05 10:47:11,017 INFO: live_monitor_resources (OpenCV) start poll_sec=1.0 max_points=300
+2025-12-05 10:47:11,550 INFO: Finding anchors...
+2025-12-05 10:47:11,651 INFO: Found anchors: {'silver': (0, 284), 'food': (90, 92)}
+2025-12-05 10:47:11,658 INFO: Game Paused (No resources detected)
+2025-12-05 10:47:51,136 INFO: Game Resumed. Paused for 39.5s
+2025-12-05 10:47:51,141 INFO: Starting alert sound: /Users/harrisonmcadams/Desktop/aoeMate/sounds/tone_11_soft_pulse.wav
+2025-12-05 10:48:07,144 INFO: Stopping alert sound
+2025-12-05 10:48:24,191 INFO: Starting alert sound: /Users/harrisonmcadams/Desktop/aoeMate/sounds/tone_11_soft_pulse.wav
+2025-12-05 10:48:34,899 INFO: Stopping alert sound
+2025-12-05 10:48:46,655 INFO: Starting alert sound: /Users/harrisonmcadams/Desktop/aoeMate/sounds/tone_11_soft_pulse.wav
+2025-12-05 10:49:19,797 INFO: Stopping alert sound
+2025-12-05 10:50:05,898 INFO: Starting alert sound: /Users/harrisonmcadams/Desktop/aoeMate/sounds/tone_11_soft_pulse.wav
+2025-12-05 10:50:09,138 INFO: Stopping alert sound
+2025-12-05 10:50:26,285 INFO: Starting alert sound: /Users/harrisonmcadams/Desktop/aoeMate/sounds/tone_11_soft_pulse.wav
+2025-12-05 10:50:45,724 INFO: Stopping alert sound
+2025-12-05 10:51:18,942 INFO: Starting alert sound: /Users/harrisonmcadams/Desktop/aoeMate/sounds/tone_11_soft_pulse.wav
+2025-12-05 10:51:20,045 INFO: Stopping alert sound
+2025-12-05 10:53:15,837 INFO: Starting alert sound: /Users/harrisonmcadams/Desktop/aoeMate/sounds/tone_11_soft_pulse.wav
+2025-12-05 10:53:22,111 INFO: Quit key pressed - exiting live monitor
+2025-12-05 10:53:22,112 INFO: OpenCV live loop ended
+2025-12-05 10:53:22,112 INFO: Stopping alert sound
+2025-12-05 11:02:38,838 INFO: live_monitor_resources (OpenCV) start poll_sec=1.0 max_points=300
+2025-12-05 11:02:39,253 INFO: Finding anchors...
+2025-12-05 11:02:39,398 INFO: Found anchors: {'silver': (13, 28), 'food': (14, 189), 'wood': (14, 228), 'gold': (14, 267), 'stone': (15, 305)}
+2025-12-05 11:03:05,947 INFO: Starting alert sound: /Users/harrisonmcadams/Desktop/aoeMate/sounds/tone_11_soft_pulse.wav
+2025-12-05 11:03:18,010 INFO: Stopping alert sound
+2025-12-05 11:04:33,693 INFO: Starting alert sound: /Users/harrisonmcadams/Desktop/aoeMate/sounds/tone_11_soft_pulse.wav
+2025-12-05 11:04:40,367 INFO: Quit key pressed - exiting live monitor
+2025-12-05 11:04:40,367 INFO: OpenCV live loop ended
+2025-12-05 11:04:40,367 INFO: Stopping alert sound

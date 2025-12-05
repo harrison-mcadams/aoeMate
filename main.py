@@ -13,6 +13,9 @@ import numpy as np
 import concurrent.futures as futures
 import threading
 import atexit
+import subprocess
+import time
+import signal
 
 # Configure logging
 log_path = Path(__file__).resolve().parent / 'aoemate.log'
@@ -141,7 +144,7 @@ def _parse_number_from_region(image: Image.Image, digit_kernels: dict, out_path:
 
 
 def _find_anchors(ss_gray, resource_kernels):
-    """Find resource icons in the screenshot with conflict resolution."""
+    """Find resource icons in the screenshot with conflict resolution and vertical alignment enforcement."""
     candidates = []
     
     # Include silver and alternate templates in the search
@@ -164,7 +167,7 @@ def _find_anchors(ss_gray, resource_kernels):
             continue
             
         res_conv = analyze_ss.match_template_arrays(ss_gray, k_gray)
-        found, peaks = analyze_ss.is_target_in_ss(res_conv, None, return_peaks=True, threshold=0.6)
+        found, peaks = analyze_ss.is_target_in_ss(res_conv, None, return_peaks=True, threshold=0.45)
         
         if found and peaks:
             for x, y, score in peaks:
@@ -173,30 +176,130 @@ def _find_anchors(ss_gray, resource_kernels):
     # Sort by score descending
     candidates.sort(key=lambda c: c['score'], reverse=True)
     
-    anchors = {}
-    occupied_positions = []
-    
-    min_dist = 10 # Minimum distance between distinct icons
+    # 1. Conflict Resolution (Spatial NMS)
+    # Keep best match for each location
+    unique_candidates = []
+    min_dist = 10 
     
     for c in candidates:
-        # Check if this position is already occupied by a better match
         is_occupied = False
-        for ox, oy in occupied_positions:
-            dist = math.hypot(c['x'] - ox, c['y'] - oy)
+        for oc in unique_candidates:
+            dist = math.hypot(c['x'] - oc['x'], c['y'] - oc['y'])
             if dist < min_dist:
                 is_occupied = True
                 break
-        
         if not is_occupied:
-            # This is a new valid anchor
-            # Check if we already have this resource (e.g. found twice?)
-            # Usually we only expect one of each, but maybe not?
-            # For now, let's assume one of each.
-            if c['name'] not in anchors:
-                # Sanity check: Resource icons should be on the left side
-                if c['x'] < 100:
-                    anchors[c['name']] = (c['x'], c['y'])
-                    occupied_positions.append((c['x'], c['y']))
+            unique_candidates.append(c)
+            
+    # 2. Vertical Alignment Enforcement (Column Clustering)
+    # Resources in AOE are always vertically aligned.
+    # We expect them to share roughly the same X coordinate.
+    # Let's group by X with a tolerance.
+    
+    if not unique_candidates:
+        return {}
+        
+    x_tolerance = 3
+    columns = [] # List of {'x_sum': ..., 'count': ..., 'candidates': []}
+    
+    for c in unique_candidates:
+        # Try to add to existing column
+        added = False
+        for col in columns:
+            avg_x = col['x_sum'] / col['count']
+            if abs(c['x'] - avg_x) <= x_tolerance:
+                col['x_sum'] += c['x']
+                col['count'] += 1
+                col['candidates'].append(c)
+                added = True
+                break
+        
+        if not added:
+            # Start new column
+            columns.append({'x_sum': c['x'], 'count': 1, 'candidates': [c]})
+            
+    # Pick the best column
+    # Criteria: 
+    # 1. Is Left Side (< 100px) - Strongest constraint for this UI
+    # 2. Contains 'food' - Food is always present
+    # 3. Count - More matches is better
+    # 4. Total Score - Tie breaker
+    
+    for col in columns:
+        col['total_score'] = sum(cand['score'] for cand in col['candidates'])
+        col['has_food'] = any(cand['name'] == 'food' for cand in col['candidates'])
+        avg_x = col['x_sum'] / col['count']
+        col['is_left'] = avg_x < 100
+        
+    # Sort: IsLeft DESC, HasFood DESC, Count DESC, TotalScore DESC
+    columns.sort(key=lambda col: (col['is_left'], col['has_food'], col['count'], col['total_score']), reverse=True)
+    
+    if columns:
+        best_col = columns[0]
+        final_candidates = best_col['candidates']
+    else:
+        final_candidates = []
+        
+    # 3. Vertical Spacing Enforcement
+    # Resources should be roughly equidistant (approx 30-50px apart).
+    # If we have a gap > 80px, it's likely an outlier.
+    
+    # Sort candidates by Y
+    final_candidates.sort(key=lambda c: c['y'])
+    
+    if len(final_candidates) > 1:
+        # Find the largest contiguous group
+        groups = []
+        current_group = [final_candidates[0]]
+        
+        for i in range(1, len(final_candidates)):
+            prev = final_candidates[i-1]
+            curr = final_candidates[i]
+            dist = curr['y'] - prev['y']
+            
+            if dist < 80: # Max allowed gap
+                current_group.append(curr)
+            else:
+                groups.append(current_group)
+                current_group = [curr]
+        groups.append(current_group)
+        
+        # Pick the best group
+        # Criteria: Has Food > Count > Total Score
+        best_group = []
+        best_score = (-1, -1, -1) # (has_food, count, total_score)
+        
+        for g in groups:
+            has_food = any(c['name'] == 'food' for c in g)
+            count = len(g)
+            total_score = sum(c['score'] for c in g)
+            score = (1 if has_food else 0, count, total_score)
+            
+            if score > best_score:
+                best_score = score
+                best_group = g
+                
+        final_candidates = best_group
+        
+        # 4. Score Consistency Check
+        # Filter out candidates that are significantly weaker than the best match in the group.
+        # This helps remove false positives that happen to align spatially.
+        if final_candidates:
+            max_score = max(c['score'] for c in final_candidates)
+            # Threshold: 75% of the max score. 
+            # If we have a perfect match (1.0), we discard anything < 0.75.
+            # If max is 0.8, we discard < 0.6.
+            final_candidates = [c for c in final_candidates if c['score'] >= 0.75 * max_score]
+
+    # 5. Final Dictionary Construction
+    anchors = {}
+    for c in final_candidates:
+        # If we have duplicates for same name in the column (unlikely with NMS but possible if vertical spacing is large),
+        # take the first one (highest score).
+        if c['name'] not in anchors:
+             # Sanity check: Resource icons should be on the left side
+             if c['x'] < 100:
+                anchors[c['name']] = (c['x'], c['y'])
             
     return anchors
 
@@ -256,6 +359,41 @@ def _shutdown_executors():
 
 # Ensure executors shut down on process exit
 atexit.register(_shutdown_executors)
+
+
+class AlertSound:
+    def __init__(self, sound_file):
+        self.sound_file = sound_file
+        self.process = None
+        self.is_playing = False
+
+    def start(self):
+        if self.is_playing:
+            return
+        
+        if not os.path.exists(self.sound_file):
+            logging.error(f"Sound file not found: {self.sound_file}")
+            return
+
+        logging.info(f"Starting alert sound: {self.sound_file}")
+        # Use a shell loop to repeat the sound indefinitely
+        cmd = f"while true; do afplay '{self.sound_file}'; done"
+        self.process = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid)
+        self.is_playing = True
+
+    def stop(self):
+        if not self.is_playing:
+            return
+
+        logging.info("Stopping alert sound")
+        if self.process:
+            try:
+                # Kill the process group to ensure the shell loop and afplay both die
+                os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+            except Exception:
+                pass
+            self.process = None
+        self.is_playing = False
 
 
 def check_villager_production(screenshot, vill_kernel=None):
@@ -341,6 +479,7 @@ def are_vills_producing():
             except Exception:
                 blank = 255 * np.ones((200, 300, 3), dtype='uint8')
                 cv2.imshow('AOEMate', blank)
+
 
             key = cv2.waitKey(poll_ms) & 0xFF
             if key == ord('q') or key == 27:
@@ -612,6 +751,11 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         font_wait = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 40)
     except:
         font_wait = ImageFont.load_default()
+
+    # Initialize Alert Sound
+    sound_path = os.path.join(os.path.dirname(__file__), 'sounds', 'tone_11_soft_pulse.wav')
+    alert_sound = AlertSound(sound_path)
+
 
     def _append_values(results, current_effective_time):
         # Use the effective time (adjusted for pauses)
@@ -1184,6 +1328,7 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                     # This effectively "freezes" the graph.
                     # We also do NOT check villager status to save resources/avoid noise.
                     current_vill_status = False 
+                    alert_sound.stop()
                     
                 else:
                     # ENTER ACTIVE STATE
@@ -1204,6 +1349,11 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                         current_vill_status = check_villager_production(screenshot, vill_kernel)
                     except Exception:
                         current_vill_status = False
+                    
+                    if not current_vill_status:
+                        alert_sound.start()
+                    else:
+                        alert_sound.stop()
                 
                 # Get current window size for responsive layout
                 try:
@@ -1232,6 +1382,7 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                 break
         logging.info('OpenCV live loop ended')
     finally:
+        alert_sound.stop()
         try:
             cv2.destroyWindow(cv_win_name)
         except Exception:
