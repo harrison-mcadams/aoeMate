@@ -14,7 +14,7 @@ def get_bbox(behavior):
         ValueError: If the behavior is not recognized.
     """
     if behavior == 'eco_summary':
-        return {'top': 850, 'left': 0, 'width': 300, 'height': 350}
+        return {'top': 850, 'left': 0, 'width': 600, 'height': 350}
     elif behavior == 'gfn_in_game':
         return {'top': 850, 'left': 0, 'width': 300, 'height': 350}
     else:

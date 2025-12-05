@@ -3,6 +3,7 @@ import math
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import List, Tuple, Dict, Optional
 
 import get_ss
 import analyze_ss
@@ -39,151 +40,104 @@ _EX_RESOURCES = None
 _CACHED_ANCHORS = None  # {name: (x, y)} relative to eco_summary
 
 
-def _parse_number_from_region(image, digit_kernels, out_path=None, name="debug"):
-    """Parse a number from an image using thresholding and contour analysis."""
-    # Threshold to isolate white text
-    thresh = analyze_ss.threshold_image(image, threshold=140)
+
+def _parse_number_from_region(image: Image.Image, digit_kernels: dict, out_path: str = None, name: str = "debug") -> List[str]:
+    """Parse a number from an image region using Sliding Window Template Matching.
     
-    if out_path:
+    This approach scans the entire image for every digit (0-9), finding all matches
+    above a threshold. It then uses Non-Maximum Suppression (NMS) to resolve overlaps.
+    This is robust to broken contours and noise.
+    """
+    if image is None:
+        return []
+
+    # Convert to grayscale numpy array
+    gray = np.array(image.convert('L'), dtype=np.float32)
+    h, w = gray.shape
+    
+    # Store all candidate matches: (x, digit_str, score, width)
+    candidates = []
+    
+    # Threshold for template matching
+    # Since we are matching white text on dark background, correlation should be high.
+    MATCH_THRESHOLD = 0.60 
+    
+    for d_str, k_gray in digit_kernels.items():
+        if k_gray is None:
+            continue
+            
         try:
-            os.makedirs(out_path, exist_ok=True)
-            Image.fromarray(thresh).save(os.path.join(out_path, f'{name}_thresh.png'))
-        except Exception:
-            pass
-    
-    # Find potential digit contours
-    bboxes = analyze_ss.find_digit_contours(thresh, min_h=8, max_h=30)
-    
-    if out_path:
-        # Draw contours on debug image
-        try:
-            debug_img = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
-            for x, y, w, h in bboxes:
-                cv2.rectangle(debug_img, (x, y), (x+w, y+h), (0, 255, 0), 1)
-            Image.fromarray(debug_img).save(os.path.join(out_path, f'{name}_contours.png'))
-        except Exception:
-            pass
-    
-    if not bboxes:
-        return None
-        
-    # Match each bbox to a digit
-    digits = []
-    for x, y, w, h in bboxes:
-        # Extract digit ROI
-        roi = thresh[y:y+h, x:x+w]
-        
-        best_digit = -1
-        best_score = -1.0
-        
-        # Simple template matching against resized templates
-        # We need to resize the ROI to match the template size or vice versa.
-        # Since templates are fixed size, let's resize ROI to a standard height (e.g. 14px)
-        # and aspect ratio, then match?
-        # OR: Just run matchTemplate of the fixed templates against the ROI?
-        # The ROI might be tight, so matchTemplate might fail if template is larger.
-        # Better approach: Resize ROI to match template height, then correlation.
-        
-        # Actually, let's stick to the plan: "Match the candidate against 0-9 digit templates"
-        # Since we have the templates loaded in `digit_kernels`, let's use them.
-        # But `digit_kernels` are full images. `_DIGIT_KERNELS_GRAY` are numpy arrays.
-        
-        # Let's try a simpler approach for now:
-        # Resize ROI to a fixed size (e.g. 10x14) and match against resized templates?
-        # Or just use the existing `match_template_arrays` but on the small ROI?
-        
-        # Given the previous code used `match_template_arrays` on the whole image,
-        # let's try to match the template *inside* the ROI (padded).
-        
-        roi_padded = np.pad(roi, ((2, 2), (2, 2)), mode='constant')
-        
-        for d, k_gray in digit_kernels.items():
-            if k_gray is None:
+            kh, kw = k_gray.shape
+            if kh > h or kw > w:
                 continue
-            
-            # If template is larger than ROI, we can't match inside.
-            # But the digits should be roughly the same size.
-            
-            # Let's try resizing the template to the ROI height
-            # (assuming font size varies slightly but aspect ratio is const)
-            
-            # For simplicity in this first pass, let's just use the standard template matching
-            # on the *original* count image, but restricted to the bbox?
-            # No, that defeats the purpose of finding contours.
-            
-        # Pad the ROI to allow template matching without resizing distortion
-        # Templates likely have some padding or are of a specific size.
-        # We want to find the template *inside* the padded ROI (or centered on it).
-        
-        # Pad with 10 pixels of black (0)
-        roi_padded = np.pad(roi, ((10, 10), (10, 10)), mode='constant', constant_values=0)
-        
-        # Dilate the padded ROI slightly to thicken strokes (helps if template is thicker)
-        # kernel = np.ones((2, 2), np.uint8)
-        # roi_padded = cv2.dilate(roi_padded, kernel, iterations=1)
-        
-        # Try erosion?
-        # kernel = np.ones((2, 2), np.uint8)
-        # roi_padded = cv2.erode(roi_padded, kernel, iterations=1)
-        
-        for d, k_gray in digit_kernels.items():
-            if k_gray is None:
-                continue
-            
-            try:
-                # Check if template fits in padded ROI
-                ph, pw = roi_padded.shape
-                th, tw = k_gray.shape
                 
-                if th > ph or tw > pw:
-                    # Template is huge? Should not happen for digits.
-                    # If it does, we can't match it inside.
-                    continue
-                    
-                # Normalized correlation
-                res = cv2.matchTemplate(roi_padded.astype(np.float32), k_gray, cv2.TM_CCOEFF_NORMED)
-                score = res.max()
-                
-                if score > best_score:
-                    best_score = score
-                    best_digit = d
-            except Exception:
-                continue
-        
-        
-        if best_digit != -1 and best_score > 0.4: # Lower threshold slightly
-            # Store (x, digit) to sort and group later
-            digits.append((x, str(best_digit), w))
+            # Match template
+            res = cv2.matchTemplate(gray, k_gray, cv2.TM_CCOEFF_NORMED)
             
-    if not digits:
+            # Find all locations above threshold
+            locs = np.where(res >= MATCH_THRESHOLD)
+            
+            for pt in zip(*locs[::-1]): # zip(x_coords, y_coords)
+                x = pt[0]
+                y = pt[1]
+                score = res[y, x]
+                candidates.append({'x': x, 'y': y, 'd': str(d_str), 'score': score, 'w': kw})
+                
+        except Exception:
+            continue
+            
+    if not candidates:
         return []
         
-    # Sort by X coordinate
-    digits.sort(key=lambda t: t[0])
+    # --- Non-Maximum Suppression (NMS) ---
+    # We want to remove overlapping matches, keeping the highest score.
+    # 1. Sort by score descending
+    candidates.sort(key=lambda c: c['score'], reverse=True)
     
-    # Group digits based on gap
-    groups = []
-    current_group = []
-    last_x_end = -1
+    final_matches = []
     
-    # Gap threshold: if gap > 12px, it's a new number
-    # (Typical digit width is ~8-10px, space is usually wider than a digit width)
-    GAP_THRESHOLD = 12 
-    
-    for x, d, w in digits:
-        if last_x_end != -1 and (x - last_x_end) > GAP_THRESHOLD:
-            # Start new group
-            if current_group:
-                groups.append("".join(current_group))
-            current_group = [d]
-        else:
-            current_group.append(d)
-        last_x_end = x + w
+    while candidates:
+        # Pick best remaining
+        best = candidates.pop(0)
+        final_matches.append(best)
         
-    if current_group:
-        groups.append("".join(current_group))
+        # Remove any remaining candidates that overlap significantly with 'best'
+        # Overlap in X is the main concern for horizontal text.
+        # We can define overlap as: |x1 - x2| < (w1 + w2) / 2 * overlap_ratio
+        # Digits are close, so we need to be careful.
+        # If centers are within ~5 pixels, it's likely the same digit or a mis-match.
         
-    return groups
+        # Let's use a strict overlap: if X distance is less than half a digit width.
+        min_dist = best['w'] * 0.6
+        
+        new_candidates = []
+        for c in candidates:
+            dist = abs(c['x'] - best['x'])
+            if dist >= min_dist:
+                new_candidates.append(c)
+        candidates = new_candidates
+        
+    # Sort final matches by X to read left-to-right
+    final_matches.sort(key=lambda c: c['x'])
+    
+    # Construct string
+    result_str = "".join([m['d'] for m in final_matches])
+    
+    # Debug output if requested
+    if out_path:
+        try:
+            debug_img = cv2.cvtColor(np.array(image.convert('RGB')), cv2.COLOR_RGB2BGR)
+            for m in final_matches:
+                x, y, w_match = m['x'], m['y'], m['w']
+                # Use kh from last template (approximate if varying) or just use h/w from match
+                # We stored w, but not h. Let's assume h is image height or close to it.
+                cv2.rectangle(debug_img, (x, y), (x + w_match, y + h), (0, 255, 0), 1)
+                cv2.putText(debug_img, m['d'], (x, y - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
+            cv2.imwrite(os.path.join(out_path, f"debug_digits_{name}.png"), debug_img)
+        except Exception:
+            pass
+
+    return [result_str] if result_str else []
 
 
 def _find_anchors(ss_gray, resource_kernels):
@@ -313,10 +267,17 @@ def check_villager_production(screenshot, vill_kernel=None):
             
     out_path = None
     try:
-        # Generalized detection: crop to top-left ROI (60x60) and lower threshold
-        roi = screenshot.crop((0, 0, 60, 60))
+        # Generalized detection: crop to top-left ROI (wider to catch offset queue)
+        # User requested buffer for ~6 slots. 
+        # eco_summary is now 600px wide. Let's search the whole top strip.
+        roi = screenshot.crop((0, 0, 600, 60))
         conv = analyze_ss.convolve_ssXkernel(roi, vill_kernel, out_path=out_path)
-        binary = analyze_ss.is_target_in_ss(conv, vill_kernel, out_path=out_path, threshold=0.65)
+        
+        # DEBUG: Print max score
+        # min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(conv)
+        # print(f"DEBUG: Villager Status Max Score: {max_val:.4f}")
+        
+        binary = analyze_ss.is_target_in_ss(conv, vill_kernel, out_path=out_path, threshold=0.60) # Lowered to 0.60
         return binary
     except Exception:
         logging.exception('Analysis error')
@@ -607,6 +568,13 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
     except Exception:
         pass
 
+    # Load villager kernel for status check
+    try:
+        vill_kernel = Image.open("/Users/harrisonmcadams/Desktop/villager_icon.png")
+    except Exception:
+        logging.warning("Could not load villager_icon.png for status check")
+        vill_kernel = None
+
     # Allow widening of the kept history window by a multiplicative factor.
     # Default is 1.2 (20% wider than `max_points`). Can be overridden via
     # the environment variable AOE_TIME_WINDOW_SCALE.
@@ -795,54 +763,76 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
             n = len(vals)
             xs = np.linspace(left_margin, plot_w - right_margin, n) if n > 0 else np.array([])
 
-            # compute simple per-sample smoothed rate (fallback behavior when possible)
-            rates = []
+            # --- New Rate Calculation: Cumulative Positive Flow ---
+            # 1. Calculate diffs, ignoring negatives (spending)
+            # 2. Compute cumulative sum of positive flow
+            # 3. Calculate rate over a sliding window (e.g. 30s)
+            
             smoothed_rates = []
-            t_secs = None
+            
             if n >= 2 and len(times) >= 2:
-                try:
-                    t_secs = [(t - times[0]).total_seconds() for t in times[-n:]] if len(times) >= n else [(times[i] - times[0]).total_seconds() for i in range(n)]
-                except Exception:
-                    t_secs = [float(i) for i in range(n)]
-                if len(t_secs) != n:
-                    t_secs = [float(i) for i in range(n)]
-                # forward-fill NaNs for rate computation
-                raw_vals = []
+                # Prepare data
+                # Forward-fill NaNs for rate computation
+                clean_vals = []
                 for ii, v in enumerate(vals):
                     if ii == 0:
-                        raw_vals.append(0.0 if (v is None or (isinstance(v, float) and math.isnan(v))) else float(v))
+                        clean_vals.append(0.0 if (v is None or (isinstance(v, float) and math.isnan(v))) else float(v))
                     else:
                         if v is None or (isinstance(v, float) and math.isnan(v)):
-                            raw_vals.append(raw_vals[-1])
+                            clean_vals.append(clean_vals[-1])
                         else:
-                            raw_vals.append(float(v))
+                            clean_vals.append(float(v))
+                
+                # Calculate Cumulative Positive Flow
+                cum_flow = [0.0] * n
+                current_cum = 0.0
+                for ii in range(1, n):
+                    diff = clean_vals[ii] - clean_vals[ii-1]
+                    if diff > 0:
+                        current_cum += diff
+                    cum_flow[ii] = current_cum
+                
+                # Calculate Rate over Window
+                # Use a fixed window of ~30 seconds (or RATE_TAU * 1.5)
+                # Since RATE_TAU defaults to 20s, let's use 30s as a good default for "step-like" gathering.
+                WINDOW_SEC = 30.0
+                
+                # Get timestamps in seconds relative to start
+                try:
+                    t_secs = [(t - times[0]).total_seconds() for t in times[-n:]] if len(times) >= n else [(times[i] - times[0]).total_seconds() for i in range(n)]
+                except:
+                    t_secs = [float(i) for i in range(n)]
 
-                # compute forward diffs as simple rate estimate
                 for ii in range(n):
-                    if ii == 0:
-                        dt = t_secs[1] - t_secs[0] if n > 1 else 1.0
-                        dv = raw_vals[1] - raw_vals[0] if n > 1 else 0.0
+                    t_curr = t_secs[ii]
+                    val_curr = cum_flow[ii]
+                    
+                    # Find start of window
+                    # We want t_start such that t_curr - t_start >= WINDOW_SEC
+                    # Search backwards
+                    k = ii
+                    while k > 0 and (t_curr - t_secs[k]) < WINDOW_SEC:
+                        k -= 1
+                    
+                    t_start = t_secs[k]
+                    val_start = cum_flow[k]
+                    
+                    dt = t_curr - t_start
+                    if dt < 1.0: # Avoid division by zero or tiny windows
+                        # Fallback to instantaneous or 0 if at start
+                        if ii > 0:
+                             dt_inst = t_secs[ii] - t_secs[ii-1]
+                             dv_inst = cum_flow[ii] - cum_flow[ii-1]
+                             rate = (dv_inst / max(0.1, dt_inst)) * 60.0
+                        else:
+                            rate = 0.0
                     else:
-                        dt = t_secs[ii] - t_secs[ii - 1]
-                        if dt == 0:
-                            dt = 1.0
-                        dv = raw_vals[ii] - raw_vals[ii - 1]
-                    if dv < 0:
-                        dv = 0.0
-                    rates.append((dv / max(1e-6, dt)) * 60.0)
-                # quick EMA smoothing
-                for ii, rrr in enumerate(rates):
-                    if ii == 0:
-                        smoothed_rates.append(rrr)
-                    else:
-                        try:
-                            dt = t_secs[ii] - t_secs[ii - 1]
-                            if dt <= 0:
-                                dt = 1.0
-                        except Exception:
-                            dt = 1.0
-                        alpha = 1.0 - math.exp(-dt / RATE_TAU)
-                        smoothed_rates.append(alpha * rrr + (1.0 - alpha) * smoothed_rates[-1])
+                        dv = val_curr - val_start
+                        rate = (dv / dt) * 60.0
+                        
+                    smoothed_rates.append(rate)
+            else:
+                smoothed_rates = [0.0] * n
 
             # compute vmin/vmax for left axis
             valid = [v for v in vals if not math.isnan(v)]
