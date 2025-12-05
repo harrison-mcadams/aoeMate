@@ -818,14 +818,11 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                     val_start = cum_flow[k]
                     
                     dt = t_curr - t_start
-                    if dt < 1.0: # Avoid division by zero or tiny windows
-                        # Fallback to instantaneous or 0 if at start
-                        if ii > 0:
-                             dt_inst = t_secs[ii] - t_secs[ii-1]
-                             dv_inst = cum_flow[ii] - cum_flow[ii-1]
-                             rate = (dv_inst / max(0.1, dt_inst)) * 60.0
-                        else:
-                            rate = 0.0
+                    
+                    # Suppress rate calculation for the first few seconds to avoid initial spikes
+                    # caused by dividing by small dt (e.g. gathering 10 res in 0.5s => 1200/min).
+                    if dt < 5.0: 
+                        rate = 0.0
                     else:
                         dv = val_curr - val_start
                         rate = (dv / dt) * 60.0
