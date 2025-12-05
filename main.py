@@ -628,6 +628,13 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         RATE_TAU = 20.0
 
     start_time = datetime.now()
+    waiting_for_game = True
+    
+    # Pre-load fonts for waiting screen
+    try:
+        font_wait = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 40)
+    except:
+        font_wait = ImageFont.load_default()
 
     def _append_values(results):
         now = datetime.now()
@@ -664,9 +671,12 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         # Trim history to the scaled window (increase by ~20% by default)
         limit = max(2, int(max_points * time_window_scale))
         if len(times) > limit:
-            del times[:-limit]
+            times.pop(0)
             for r in resource_names:
-                del data[r][:-limit]
+                if len(data[r]) > len(times):
+                    data[r].pop(0)
+                if len(vill_data[r]) > len(times):
+                    vill_data[r].pop(0)
 
     # Pre-load fonts
     try:

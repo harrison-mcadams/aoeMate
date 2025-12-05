@@ -987,3 +987,8 @@
 2025-12-04 19:15:32,165 INFO: live_monitor_resources (OpenCV) start poll_sec=1.0 max_points=300
 2025-12-04 19:15:32,571 INFO: Finding anchors...
 2025-12-04 19:15:32,651 INFO: Found anchors: {'gold': (14, 228), 'stone': (15, 272), 'wood': (14, 183), 'food': (14, 138), 'silver': (13, 316)}
+2025-12-04 19:17:35,988 INFO: Quit key pressed - exiting live monitor
+2025-12-04 19:17:35,988 INFO: OpenCV live loop ended
+2025-12-04 19:19:50,654 INFO: live_monitor_resources (OpenCV) start poll_sec=1.0 max_points=300
+2025-12-04 19:19:51,112 INFO: Finding anchors...
+2025-12-04 19:19:51,182 INFO: Found anchors: {'stone': (15, 272), 'gold': (14, 228), 'wood': (14, 183), 'food': (14, 138), 'silver': (13, 316)}
