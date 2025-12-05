@@ -1045,3 +1045,9 @@
 2025-12-04 19:51:40,120 INFO: live_monitor_resources (OpenCV) start poll_sec=1.0 max_points=300
 2025-12-04 19:51:40,481 INFO: Finding anchors...
 2025-12-04 19:51:40,561 INFO: Found anchors: {'gold': (14, 228), 'stone': (15, 272), 'wood': (14, 183), 'food': (14, 138), 'silver': (13, 316)}
+2025-12-04 19:57:06,227 INFO: live_monitor_resources (OpenCV) start poll_sec=1.0 max_points=300
+2025-12-04 19:57:06,894 INFO: Finding anchors...
+2025-12-04 19:57:06,978 INFO: Found anchors: {'gold': (14, 228), 'stone': (15, 272), 'food': (14, 138), 'wood': (14, 183), 'silver': (13, 316)}
+2025-12-04 20:00:44,418 INFO: live_monitor_resources (OpenCV) start poll_sec=1.0 max_points=300
+2025-12-04 20:00:44,863 INFO: Finding anchors...
+2025-12-04 20:00:44,945 INFO: Found anchors: {'gold': (14, 228), 'stone': (15, 272), 'food': (14, 138), 'wood': (14, 183), 'silver': (13, 316)}

@@ -908,51 +908,64 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                 p_vmin, p_vmax = G_vmin, G_vmax
                 p_rmin, p_rmax = G_rmin, G_rmax
 
-            # Plot resource totals
+            # Define Colors (BGR)
+            # Food: Red/Orange, Wood: Brown, Gold: Yellow, Stone: Grey, Silver: Cyan/White
+            COLORS = {
+                'food': (50, 50, 255),   # Red
+                'wood': (42, 42, 165),   # Brownish
+                'gold': (0, 215, 255),   # Gold
+                'stone': (160, 160, 160),# Grey
+                'silver': (255, 255, 200),# Light Cyan/Silver
+                'Total': (20, 20, 20)    # Dark Grey/Black
+            }
+            
+            base_color = COLORS.get(name, (0, 0, 0))
+            
+            # Plot resource totals (Raw Count) -> Solid Thick Line
             pts = []
             vrange = p_vmax - p_vmin if p_vmax != p_vmin else 1.0
             for k in range(n):
                 val = vals[k]
                 if math.isnan(val):
-                    y = bottom - 4
-                else:
-                    y = int(top + (plot_h - 20) * (1.0 - (float(val) - p_vmin) / vrange)) + 10
+                    continue # Skip NaNs for continuous line? Or break? 
+                    # If we skip, it connects across gaps. If we want gaps, we need multiple polylines.
+                    # For now, let's just skip to connect.
+                
+                y = int(top + (plot_h - 20) * (1.0 - (float(val) - p_vmin) / vrange)) + 10
                 x = int(xs[k])
                 pts.append((x, y))
+            
             if pts:
                 pts_arr = np.array(pts, dtype=np.int32)
-                color = (0, 0, 0) if name == 'Total' else (0, 120, 255) # Black line for Total
                 thickness = 3 if name == 'Total' else 2
-                cv2.polylines(canvas_cv, [pts_arr], False, color, thickness, lineType=cv2.LINE_AA)
-                for (x, y) in pts:
-                    cv2.circle(canvas_cv, (x, y), 3, (0, 80, 200), -1)
+                cv2.polylines(canvas_cv, [pts_arr], False, base_color, thickness, lineType=cv2.LINE_AA)
+                # Removed circles (symbols)
             
             # Store scale for text rendering
             ent['p_vmin'] = p_vmin
             ent['p_vmax'] = p_vmax
             ent['p_rmin'] = p_rmin
             ent['p_rmax'] = p_rmax
+            ent['color'] = base_color # Store for text
 
-            # Plot smoothed rate on right axis
+            # Plot smoothed rate on right axis -> Dashed/Dotted Line
             srates = ent['smoothed_rates']
             if srates:
                 rrange = p_rmax - p_rmin if p_rmax != p_rmin else 1.0
                 pts_rate = []
                 for k, srate in enumerate(srates):
                     if math.isnan(srate):
-                        y_r = bottom - 4
-                    else:
-                        y_r = int(top + (plot_h - 20) * (1.0 - (srate - p_rmin) / rrange)) + 10
+                        continue
+                    y_r = int(top + (plot_h - 20) * (1.0 - (srate - p_rmin) / rrange)) + 10
                     x = int(xs[k])
                     pts_rate.append((x, y_r))
-                if pts_rate:
+                
+                if len(pts_rate) > 1:
+                    # Draw Rate as Thin Solid Line
+                    # Rate color: Match resource color (base_color)
+                    rate_color = base_color
                     pts_rate_arr = np.array(pts_rate, dtype=np.int32)
-                    try:
-                        cv2.polylines(canvas_cv, [pts_rate_arr], False, (34, 139, 34), 1, lineType=cv2.LINE_AA)
-                    except Exception:
-                        pass
-                    for (xr, yr) in pts_rate:
-                        cv2.circle(canvas_cv, (xr, yr), 2, (34, 139, 34), -1)
+                    cv2.polylines(canvas_cv, [pts_rate_arr], False, rate_color, 1, lineType=cv2.LINE_AA)
 
         # --- Right Side: Villager Status ---
         # Draw a large box
@@ -982,6 +995,10 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
             p_vmin, p_vmax = ent['p_vmin'], ent['p_vmax']
             p_rmin, p_rmax = ent['p_rmin'], ent['p_rmax']
             
+            # Use stored color for title (convert BGR to RGB)
+            bgr = ent.get('color', (0, 0, 0))
+            rgb_title = (bgr[2], bgr[1], bgr[0])
+            
             # Use bold font for Total
             f_title = font_title_bold if name == 'Total' else font_title
             f_val = font_val_bold if name == 'Total' else font_val
@@ -991,19 +1008,21 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
             draw.text((4, bottom - 12), f'{int(p_vmin)}', font=font_axis, fill=(0, 0, 0))
             
             # Right axis labels
-            draw.text((plot_w - right_margin + 2, top + 18), f'{int(p_rmax)}', font=font_axis, fill=(34, 139, 34))
-            draw.text((plot_w - right_margin + 2, bottom - 12), f'{int(p_rmin)}', font=font_axis, fill=(34, 139, 34))
+            draw.text((plot_w - right_margin + 2, top + 18), f'{int(p_rmax)}', font=font_axis, fill=rgb_title)
+            draw.text((plot_w - right_margin + 2, bottom - 12), f'{int(p_rmin)}', font=font_axis, fill=rgb_title)
             
             # Title (adjusted y)
             title_y = top + 10
-            draw.text((left_margin - 10, title_y), name.title(), font=f_title, fill=(10, 10, 10))
+            draw.text((left_margin - 10, title_y), name.title(), font=f_title, fill=rgb_title)
             
-            # Current value + inline rate text
+            # --- Summary Data (Centered in Right Margin) ---
+            col_center_x = plot_w - (right_margin // 2)
+            
+            # 1. Resource Count & Rate
             vals = ent['vals']
             cur = vals[-1] if vals else math.nan
             cur_text = str(int(cur)) if (not math.isnan(cur)) else 'NaN'
             
-            # Calculate Rate
             latest_rate = 0.0
             try:
                 if ent['smoothed_rates']:
@@ -1013,37 +1032,25 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
             except Exception:
                 latest_rate = 0.0
             
-            latest_rate_text = f' ({latest_rate:.1f}/min)' if latest_rate != 0 else ''
-            display_text = f'{cur_text}{latest_rate_text}'
+            line1_text = f"{cur_text} ({latest_rate:.0f}/min)"
             
-            # Right-aligned current value
-            bbox = draw.textbbox((0, 0), display_text, font=f_val)
+            # Draw Line 1
+            bbox = draw.textbbox((0, 0), line1_text, font=f_val)
             tw = bbox[2] - bbox[0]
-            tx = max(left_margin, plot_w - right_margin - tw - 6)
-            ty = top + 12
-            draw.text((tx, ty), display_text, font=f_val, fill=(50, 150, 50))
+            draw.text((col_center_x - tw // 2, top + 10), line1_text, font=f_val, fill=rgb_title)
             
-            # --- Villager Stats Column ---
-            # Centered in the right margin area
-            col_center_x = plot_w - (right_margin // 2)
+            # 2. Villager Count & Per-Vill Rate
             vill_count = int(ent['vill_count'])
-            
-            # Per-villager rate
             per_vill_rate = 0.0
             if vill_count > 0:
                 per_vill_rate = latest_rate / vill_count
             
-            # Draw Villager Count
-            v_text = f"{vill_count} vills"
-            bbox = draw.textbbox((0, 0), v_text, font=font_vill_count)
-            tw = bbox[2] - bbox[0]
-            draw.text((col_center_x - tw // 2, top + 10), v_text, font=font_vill_count, fill=(0, 0, 0))
+            line2_text = f"{vill_count} vills ({per_vill_rate:.1f}/min)"
             
-            # Draw Per-Vill Rate
-            r_text = f"{per_vill_rate:.1f}/min"
-            bbox = draw.textbbox((0, 0), r_text, font=font_vill_rate)
+            # Draw Line 2
+            bbox = draw.textbbox((0, 0), line2_text, font=font_vill_rate)
             tw = bbox[2] - bbox[0]
-            draw.text((col_center_x - tw // 2, top + 30), r_text, font=font_vill_rate, fill=(100, 100, 100))
+            draw.text((col_center_x - tw // 2, top + 32), line2_text, font=font_vill_rate, fill=(80, 80, 80))
 
         # Draw Text for Villager Status
         label_lines = ["VILLAGER", "PRODUCTION"]
