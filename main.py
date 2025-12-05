@@ -167,10 +167,23 @@ def _find_anchors(ss_gray, resource_kernels):
             continue
             
         res_conv = analyze_ss.match_template_arrays(ss_gray, k_gray)
-        found, peaks = analyze_ss.is_target_in_ss(res_conv, None, return_peaks=True, threshold=0.45)
+        # Lower threshold to catch faint icons, relying on spatial priors to filter noise
+        found, peaks = analyze_ss.is_target_in_ss(res_conv, None, return_peaks=True, threshold=0.40)
         
         if found and peaks:
             for x, y, score in peaks:
+                # 0. Spatial Restriction: Only consider left strip where icons live
+                # Valid icons are at x=14. x=90 is noise.
+                if x > 60:
+                    continue
+                    
+                # 0. Spatial Prior: Boost score if near expected x=14
+                dist_from_expected = abs(x - 14)
+                if dist_from_expected < 5:
+                    score += 0.2 # Significant boost for being in the right spot
+                elif dist_from_expected < 10:
+                    score += 0.1
+                    
                 candidates.append({'name': name, 'score': score, 'x': int(x), 'y': int(y)})
                 
     # Sort by score descending
@@ -220,7 +233,7 @@ def _find_anchors(ss_gray, resource_kernels):
             
     # Pick the best column
     # Criteria: 
-    # 1. Is Left Side (< 100px) - Strongest constraint for this UI
+    # 1. Is Aligned (abs(x-14) < 15) - Must be in the expected column
     # 2. Contains 'food' - Food is always present
     # 3. Count - More matches is better
     # 4. Total Score - Tie breaker
@@ -229,13 +242,16 @@ def _find_anchors(ss_gray, resource_kernels):
         col['total_score'] = sum(cand['score'] for cand in col['candidates'])
         col['has_food'] = any(cand['name'] == 'food' for cand in col['candidates'])
         avg_x = col['x_sum'] / col['count']
-        col['is_left'] = avg_x < 100
+        col['is_aligned'] = abs(avg_x - 14) < 15
         
-    # Sort: IsLeft DESC, HasFood DESC, Count DESC, TotalScore DESC
-    columns.sort(key=lambda col: (col['is_left'], col['has_food'], col['count'], col['total_score']), reverse=True)
+    # Sort: IsAligned DESC, HasFood DESC, Count DESC, TotalScore DESC
+    columns.sort(key=lambda col: (col['is_aligned'], col['has_food'], col['count'], col['total_score']), reverse=True)
     
     if columns:
         best_col = columns[0]
+        # Strict check: If the best column is not aligned, we assume no valid resources found (Pause state)
+        if not best_col['is_aligned']:
+            return {}
         final_candidates = best_col['candidates']
     else:
         final_candidates = []
@@ -300,6 +316,13 @@ def _find_anchors(ss_gray, resource_kernels):
              # Sanity check: Resource icons should be on the left side
              if c['x'] < 100:
                 anchors[c['name']] = (c['x'], c['y'])
+                
+    # 6. Sanity Check: Minimum Resources
+    # If we only found 1 resource, it's likely a false positive (noise).
+    # A valid game screen should have at least Food, Wood, Gold, Stone (4).
+    # We'll be conservative and require at least 2.
+    if len(anchors) < 2:
+        return {}
             
     return anchors
 
