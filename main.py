@@ -644,30 +644,44 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
             v = None
             if results and r in results:
                 v = results[r]
-            if v is None:
-                data[r].append(math.nan)
-            else:
+            
+            new_val = math.nan
+            if v is not None:
                 sval = str(v).replace(',', '').strip()
                 try:
-                    data[r].append(int(sval))
+                    new_val = int(sval)
                 except Exception:
                     try:
-                        data[r].append(float(sval))
+                        new_val = float(sval)
                     except Exception:
-                        data[r].append(math.nan)
+                        new_val = math.nan
+            
+            # If detection failed (NaN), hold the last valid value (Extrapolation for Pause)
+            if math.isnan(new_val):
+                if data[r] and not math.isnan(data[r][-1]):
+                    new_val = data[r][-1]
+            
+            data[r].append(new_val)
             
             # Villager Value
             v_vill = None
             if results and f'{r}_vills' in results:
                 v_vill = results[f'{r}_vills']
-            if v_vill is None:
-                vill_data[r].append(math.nan)
-            else:
+            
+            new_vill_val = math.nan
+            if v_vill is not None:
                 sval_v = str(v_vill).replace(',', '').strip()
                 try:
-                    vill_data[r].append(int(sval_v))
+                    new_vill_val = int(sval_v)
                 except Exception:
-                    vill_data[r].append(math.nan)
+                    new_vill_val = math.nan
+            
+            # If detection failed (NaN), hold the last valid value
+            if math.isnan(new_vill_val):
+                if vill_data[r] and not math.isnan(vill_data[r][-1]):
+                    new_vill_val = vill_data[r][-1]
+            
+            vill_data[r].append(new_vill_val)
         # Trim history to the scaled window (increase by ~20% by default)
         limit = max(2, int(max_points * time_window_scale))
         if len(times) > limit:
