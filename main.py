@@ -600,7 +600,12 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         RATE_TAU = 20.0
 
     start_time = datetime.now()
-    waiting_for_game = True
+    
+    # Pause Logic State
+    from datetime import timedelta
+    total_paused_duration = timedelta(seconds=0)
+    pause_start_time = None
+    is_paused = False
     
     # Pre-load fonts for waiting screen
     try:
@@ -608,9 +613,10 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
     except:
         font_wait = ImageFont.load_default()
 
-    def _append_values(results):
-        now = datetime.now()
-        times.append(now)
+    def _append_values(results, current_effective_time):
+        # Use the effective time (adjusted for pauses)
+        times.append(current_effective_time)
+        
         for r in resource_names:
             # Resource Value
             v = None
@@ -654,6 +660,7 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                     new_vill_val = vill_data[r][-1]
             
             vill_data[r].append(new_vill_val)
+            
         # Trim history to the scaled window (increase by ~20% by default)
         limit = max(2, int(max_points * time_window_scale))
         if len(times) > limit:
@@ -685,6 +692,9 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         font_status_label = ImageFont.truetype(font_path, 18)
         font_status_val = ImageFont.truetype(font_path, 36) # Much larger status
         font_footer = ImageFont.truetype(font_path, 12)
+        
+        # Pause Overlay Font
+        font_pause = ImageFont.truetype(font_path_bold, 60)
     except Exception:
         # Fallback to default if Arial not found
         font_axis = ImageFont.load_default()
@@ -697,6 +707,7 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         font_status_label = ImageFont.load_default()
         font_status_val = ImageFont.load_default()
         font_footer = ImageFont.load_default()
+        font_pause = ImageFont.load_default()
 
     def render_frame(current_w=None, current_h=None):
         # Use current window dimensions if provided, else default
@@ -778,26 +789,6 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
             n = len(vals)
             xs = np.linspace(left_margin, plot_w - right_margin, n) if n > 0 else np.array([])
 
-            # Rate Calculation (unchanged)...
-            smoothed_rates = []
-            if n >= 2 and len(times) >= 2:
-                # ... (same rate logic) ...
-                # Copying rate logic for brevity in replacement, assuming it's unchanged
-                # Actually I need to include it or the replace will fail if I skip lines.
-                # I'll try to match the context carefully.
-                # Since I'm replacing a large block, I should be careful.
-                # Let's just update the drawing part mostly.
-                pass 
-
-            # ... (skipping rate calc lines for now, will target drawing loop) ...
-
-        # Let's target the Second Pass loop where drawing happens
-        
-        # ...
-
-    # I will target the drawing loop specifically
-
-
             # --- New Rate Calculation: Cumulative Positive Flow ---
             # 1. Calculate diffs, ignoring negatives (spending)
             # 2. Compute cumulative sum of positive flow
@@ -843,7 +834,7 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                     val_curr = cum_flow[ii]
                     
                     # Find start of window
-                    # We want t_start such that t_curr - t_start >= WINDOW_SEC
+                    # We want t_curr - t_start >= WINDOW_SEC
                     # Search backwards
                     k = ii
                     while k > 0 and (t_curr - t_secs[k]) < WINDOW_SEC:
@@ -1125,11 +1116,34 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         draw.text((tx, y_cursor), status_text, font=font_status_val, fill=text_color_rgb)
 
         # Elapsed time footer
-        elapsed = (datetime.now() - start_time).total_seconds()
+        # Use effective time
+        effective_now = datetime.now() - total_paused_duration
+        if is_paused and pause_start_time:
+             # If currently paused, effective time is frozen at pause start
+             effective_now = pause_start_time - total_paused_duration
+             
+        elapsed = (effective_now - start_time).total_seconds()
         draw.text((10, win_h - 15), f'Elapsed: {int(elapsed)}s', font=font_footer, fill=(50, 50, 50))
 
+        # --- PAUSE OVERLAY ---
+        if is_paused:
+            # Draw semi-transparent overlay
+            # PIL doesn't support alpha composite on RGB easily without converting to RGBA
+            # Let's just draw a "PAUSED" text with a background box in the center
+            
+            pause_text = "PAUSED"
+            bbox = draw.textbbox((0, 0), pause_text, font=font_pause)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+            
+            cx, cy = w // 2, h // 2
+            
+            # Draw box
+            draw.rectangle((cx - tw//2 - 20, cy - th//2 - 20, cx + tw//2 + 20, cy + th//2 + 20), fill=(0, 0, 0))
+            draw.text((cx - tw//2, cy - th//2), pause_text, font=font_pause, fill=(255, 255, 255))
+
         # Convert back to OpenCV (BGR)
-        return cv2.cvtColor(np.array(canvas_pil), cv2.COLOR_RGB2BGR)
+        return cv2.cvtColor(np.array(canvas_pil), cv2.COLOR_BGR2RGB)
 
     try:
         _LIVE_ANIMATION = True
@@ -1146,13 +1160,50 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                     results = summarize_eco(screenshot=screenshot)
                 except Exception:
                     logging.exception('summarize_eco() failed')
-                _append_values(results)
                 
-                # Check villager production
-                try:
-                    current_vill_status = check_villager_production(screenshot, vill_kernel)
-                except Exception:
-                    current_vill_status = False
+                # --- PAUSE DETECTION LOGIC ---
+                # If all resources are None, we assume we are NOT in game (Paused/Menu)
+                # Check if we have ANY valid data
+                has_valid_data = False
+                if results:
+                    for k, v in results.items():
+                        if v is not None:
+                            has_valid_data = True
+                            break
+                
+                now = datetime.now()
+                
+                if not has_valid_data:
+                    # ENTER PAUSE STATE
+                    if not is_paused:
+                        is_paused = True
+                        pause_start_time = now
+                        logging.info("Game Paused (No resources detected)")
+                    
+                    # While paused, we do NOT append new values to the history.
+                    # This effectively "freezes" the graph.
+                    # We also do NOT check villager status to save resources/avoid noise.
+                    current_vill_status = False 
+                    
+                else:
+                    # ENTER ACTIVE STATE
+                    if is_paused:
+                        # Just resumed
+                        pause_duration = now - pause_start_time
+                        total_paused_duration += pause_duration
+                        is_paused = False
+                        pause_start_time = None
+                        logging.info(f"Game Resumed. Paused for {pause_duration.total_seconds():.1f}s")
+                    
+                    # Append values using effective time
+                    effective_time = now - total_paused_duration
+                    _append_values(results, effective_time)
+                
+                    # Check villager production only when active
+                    try:
+                        current_vill_status = check_villager_production(screenshot, vill_kernel)
+                    except Exception:
+                        current_vill_status = False
                 
                 # Get current window size for responsive layout
                 try:

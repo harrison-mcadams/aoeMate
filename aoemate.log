@@ -1094,3 +1094,9 @@
 2025-12-04 22:59:41,105 INFO: Found anchors: {'gold': (14, 267), 'stone': (15, 305), 'food': (14, 189), 'wood': (14, 228), 'silver': (13, 28)}
 2025-12-04 23:33:46,748 INFO: Quit key pressed - exiting live monitor
 2025-12-04 23:33:46,751 INFO: OpenCV live loop ended
+2025-12-05 10:28:43,034 INFO: live_monitor_resources (OpenCV) start poll_sec=1.0 max_points=300
+2025-12-05 10:28:43,489 INFO: Finding anchors...
+2025-12-05 10:28:43,587 INFO: Found anchors: {'silver': (69, 49)}
+2025-12-05 10:28:43,590 INFO: Game Paused (No resources detected)
+2025-12-05 10:28:55,748 INFO: Quit key pressed - exiting live monitor
+2025-12-05 10:28:55,749 INFO: OpenCV live loop ended
