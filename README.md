@@ -1,72 +1,99 @@
 # aoeMate
 
-aoeMate is a small Python toolkit that captures screen regions, runs simple image matching (template matching) or OCR, and provides a live visual status window to monitor in-game events (for example: detecting whether villagers are producing in AOE4).
+**aoeMate** is a real-time Age of Empires 4 (AOE4) economy monitor. It captures a specific region of your screen (the resource panel), parses the resource counts using computer vision (template matching), and tracks your villager production queue.
 
-This README documents setup, running the live loop, debugging tips, and where to find key settings.
+It provides a live **visual overlay** of your economy and an **audio alert** if your Town Center is idle (no villagers queuing).
+
+## Features
+
+- **Real-time Resource Tracking**: Graphs Food, Wood, Gold, Stone, and Silver/Olive Oil.
+- **Idle Queue Alert**: Plays a subtle "pulse" sound when your villager queue is empty.
+- **Robust Digit Recognition**: Uses custom template matching with digit recognition tuned for the AOE4 UI font.
+- **Multi-Monitor Support**: Specifically configured to capture from a secondary (left) monitor.
 
 ---
 
-Quick overview
---------------
-- `getSS.py` - capture a region of the screen and return a PIL Image (optionally save to disk).
-- `analyzeSS.py` - analysis helper functions (template matching using OpenCV's matchTemplate, peak detection, optional debug visualizations).
-- `are_vills_producing.py` / `main.py` - interactive monitoring loops that repeatedly capture a region and display a large green/red status window to indicate detection.
+## Setup & Installation
 
-Goals of this repository
-------------------------
-- Be able to capture a small screen region consistently.
-- Run a fast, local template-matching pipeline to detect a given UI icon.
-- Provide a simple visual indicator (large centered window) so you can run the monitor while playing.
-- Keep disk I/O optional (debug-only) and provide clear debug outputs when requested.
+1.  **Prerequisites**:
 
-Requirements
-------------
-- Python 3.10+ recommended
-- Required Python packages (basic): `opencv-python`, `pillow`, `numpy`
-- Optional packages for extra features and debugging: `matplotlib`, `pyautogui`, `google-cloud-vision` (if using cloud OCR)
+    - Python 3.10+ installed.
+    - Windows OS (recommended for audio alerts and screen capture).
 
-Install (recommended in virtualenv)
-----------------------------------
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+2.  **Install**:
+
+    ```powershell
+    # Create virtual environment
+    python -m venv venv
+
+    # Activate (PowerShell)
+    .\venv\Scripts\Activate.ps1
+
+    # Install dependencies
+    pip install -r requirements.txt
+    ```
+
+3.  **Template Configuration**:
+    The system relies on a set of reference icons in the `templates/` directory.
+
+    - **Required Files**: `food.png`, `wood.png`, `gold.png`, `stone.png`, `villager_generic.png`, `villager_separator.png`.
+    - **Digits**: `0.png` through `9.png`.
+
+    **To Add/Update Templates**:
+
+    1.  Take a high-resolution screenshot of the game UI (press `PrtScn`).
+    2.  Open in an image editor (e.g., Paint, Photoshop).
+    3.  Crop significantly tightly around the icon or number.
+    4.  Save as a `.png` file in the `templates/` folder.
+        _Note: The system is sensitive to the exact pixel structure, so ensure screenshots are from the same resolution used for playing (e.g., 2560x1600)._
+
+---
+
+## Usage
+
+### 1. Configure Screen Capture (`get_ss.py`)
+
+By default, the script captures from the **Left-most monitor** (Index 2 in `mss`).
+
+- If you play on your primary monitor, you may need to edit `get_ss.py`:
+  ```python
+  # Change this line in capture_gfn_screen_region:
+  monitor = monitors[2]  # Left monitor
+  # To:
+  monitor = monitors[1]  # Primary monitor
+  ```
+
+### 2. Run the Monitor
+
+```powershell
+python main.py
 ```
 
-Run the monitor
----------------
-Start the live monitor (will open a centered status window):
+- A window `AOEMatePlot` will open, showing live graphs.
+- The console will log the current Villager Queue Score and detected resources.
+- **Audio Alert**: You will hear a soft pulse if the Queue Score drops below `0.70`.
 
-```bash
-python3 main.py
-```
+### 3. Controls
 
-Controls
---------
-- Press `q` or `Esc` while the status window has focus to quit the monitoring loop.
-- Use `AOEMATE_POLL_MS` environment variable to change the polling interval (ms). Example: `AOEMATE_POLL_MS=250 python3 main.py`.
+- **Exit**: Click the OpenCV window and press `q` or `Esc`.
+- **Pause**: The system automatically detects pauses (black screens/menus) and stops logging.
 
-Debugging and examples
-----------------------
-- By default, the capture/analysis routines do not write debug files. To collect debug outputs (heatmaps, annotated images, crops), pass an `out_path` directory to the analysis/capture functions or enable debugging in the module demos.
-- If the window isn't centered correctly on your machine, set `AOEMATE_SCREEN_W` and `AOEMATE_SCREEN_H` to your monitor resolution or install `pyautogui` in your environment so the code can detect screen size automatically.
+---
 
-API notes for developers
-------------------------
-- `getSS.capture_gfn_screen_region(bbox, *, out_path: Optional[str] = None) -> PIL.Image` : captures and returns an image, saves to `out_path` only if provided.
-- `analyzeSS.convolve_ssXkernel(ss, kernel, *, out_path: Optional[str] = None)` : returns the matchTemplate response map; saves a visualization if `out_path` is provided.
-- `analyzeSS.is_target_in_ss(res, target=None, *, out_path: Optional[str] = None, threshold=0.8, min_distance=10)` : returns True if peaks are detected in response map; optionally saves heatmap/histogram to `out_path`.
+## Troubleshooting
 
-Troubleshooting notes
----------------------
-- On macOS, GUI-related libraries (tkinter, certain matplotlib backends) can raise Objective-C exceptions in some environments. The code attempts to avoid that by using non-GUI matplotlib backends (`Agg`) and by detecting screen size using safe methods.
-- If you encounter crashes related to GUI toolkits, prefer running the analysis functions directly (they do not require a display) or set the environment variables mentioned above to bypass auto-detection.
+### "Extra Numbers" in Resource Counts
 
-Contributing
-------------
-- Keep `out_path` optional. Avoid writing to disk by default.
-- Add unit tests or small synthetic-image scripts for vision routines so parameter changes can be validated automatically.
+If you see resource counts like `10500` instead of `500`, the system might be detecting noise as digits.
 
-License
--------
-This project is private; add a LICENSE file if you plan to open-source.
+- **Fix**: The `main.py` uses a high match threshold (`0.70`) and a "horizontal gap check" (>15px). Ensure your `templates/` digits are clean and do not include background noise.
+
+### Villager Queue Not Detecting
+
+- **Check the template**: Ensure `templates/villager_generic.png` matches your current in-game icon (with or without the number overlay).
+- **Threshold**: The detection threshold is set in `main.py` (currently `0.70`). If it fails to trigger, you might need to lower this, but `0.70` is tuned for high-confidence matching.
+
+### Capture Region is Wrong
+
+- The capture region is defined in `get_ss.py` under the `'eco_summary'` bounding box.
+- Use a tool like ShareX or MSpaint to find the `top`, `left`, `width`, and `height` of your resource panel relative to the monitor, and update the values in `get_ss.py`.

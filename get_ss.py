@@ -2,6 +2,7 @@ from mss import mss
 from PIL import Image
 from pathlib import Path
 from typing import Optional
+import os
 
 def get_bbox(behavior):
     """
@@ -14,9 +15,16 @@ def get_bbox(behavior):
         ValueError: If the behavior is not recognized.
     """
     if behavior == 'eco_summary':
-        return {'top': 850, 'left': 0, 'width': 600, 'height': 350}
+        # Adjusted based on user feedback: 
+        # - Top moved up (was 850, now 600) to capture more above.
+        # - Width reduced (was 600, now 400) to avoid excess.
+        # - Height adjusted (was 350) to fit 1080p screen (600+480=1080).
+        return {'top': 600, 'left': 0, 'width': 400, 'height': 480}
     elif behavior == 'gfn_in_game':
         return {'top': 850, 'left': 0, 'width': 300, 'height': 350}
+    # elif behavior == 'global_queue':
+    #     # REMOVED: User indicates queue is in the top of eco_summary
+    #     pass
     else:
         raise ValueError(f"Unrecognized behavior: {behavior}")
 
@@ -31,7 +39,17 @@ def capture_gfn_screen_region(bbox, *, out_path: Optional[str] = None):
         PIL.Image: the captured image
     """
     with mss() as sct:
-        mon = sct.monitors[0]  # Use the primary monitor
+        # User requested left monitor, which seems to be index 2 based on debug output.
+        # Allow override via AOE_MONITOR_INDEX
+        try:
+             mon_idx = int(os.environ.get('AOE_MONITOR_INDEX', 2))
+        except ValueError:
+             mon_idx = 2
+        
+        if mon_idx >= len(sct.monitors):
+            mon_idx = 0 # Fallback
+            
+        mon = sct.monitors[mon_idx]
 
         monitor_bbox = {
             'top': mon['top'] + bbox['top'],
@@ -56,6 +74,32 @@ def capture_gfn_screen_region(bbox, *, out_path: Optional[str] = None):
                 raise
 
         return img
+
+def main(target='eco_summary', out_path=None):
+    """
+    High-level wrapper to capture a target region and save it to disk.
+    Args:
+        target (str): The behavior/target region name.
+        out_path (str, optional): The path to save the screenshot. 
+                                  If None, saves to a temporary file or fixed location.
+    Returns:
+        str: The absolute path to the saved screenshot, or None if failed.
+    """
+    try:
+        bbox = get_bbox(target)
+        if not out_path:
+            # Default to a fixed path in temp or current directory if not specified
+            # For this app, let's just use the target name in the current dir or temp
+            # But main.py loop calls this repeatedly, so overwriting is fine/desired.
+            import tempfile
+            fname = f"aoe_capture_{target}.png"
+            out_path = os.path.join(tempfile.gettempdir(), fname)
+        
+        capture_gfn_screen_region(bbox, out_path=out_path)
+        return out_path
+    except Exception as e:
+        print(f"Error in get_ss.main({target}): {e}")
+        return None
 
 
 if __name__ == "__main__":

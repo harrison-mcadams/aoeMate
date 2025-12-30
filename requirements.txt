@@ -3,4 +3,5 @@ certifi
 Pillow
 mss
 numpy
+opencv-python
 

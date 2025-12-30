@@ -31,7 +31,9 @@ logging.basicConfig(
 _LIVE_ANIMATION = None
 
 # Module-level cache for kernels and executors to avoid repeated I/O and thread creation
-_KERNEL_PATH = os.environ.get('AOE_KERNEL_PATH', '/Users/harrisonmcadams/Desktop/')
+
+# Module-level cache for kernels and executors to avoid repeated I/O and thread creation
+_KERNEL_PATH = os.environ.get('AOE_KERNEL_PATH', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates'))
 _RESOURCE_KERNELS = {}
 _RESOURCE_KERNELS_GRAY = {}
 _DIGIT_KERNELS_GRAY = {}
@@ -41,7 +43,6 @@ _MAX_WORKERS = max(2, min(8, (os.cpu_count() or 4)))
 _EX_DIGITS = None
 _EX_RESOURCES = None
 _CACHED_ANCHORS = None  # {name: (x, y)} relative to eco_summary
-
 
 
 def _parse_number_from_region(image: Image.Image, digit_kernels: dict, out_path: str = None, name: str = "debug") -> List[str]:
@@ -63,7 +64,8 @@ def _parse_number_from_region(image: Image.Image, digit_kernels: dict, out_path:
     
     # Threshold for template matching
     # Since we are matching white text on dark background, correlation should be high.
-    MATCH_THRESHOLD = 0.60 
+    # Increased to 0.70 to avoid false positives (extra numbers in noise).
+    MATCH_THRESHOLD = 0.70 
     
     for d_str, k_gray in digit_kernels.items():
         if k_gray is None:
@@ -97,6 +99,13 @@ def _parse_number_from_region(image: Image.Image, digit_kernels: dict, out_path:
     # 1. Sort by score descending
     candidates.sort(key=lambda c: c['score'], reverse=True)
     
+    # Filter by vertical alignment: Assuming single line of text.
+    # The highest scoring candidate establishes the "correct" Y level.
+    if candidates:
+        best_y = candidates[0]['y']
+        # Allow +/- 8 pixels of vertical drift (digits are roughly 10-15px high)
+        candidates = [c for c in candidates if abs(c['y'] - best_y) < 8]
+    
     final_matches = []
     
     while candidates:
@@ -112,7 +121,6 @@ def _parse_number_from_region(image: Image.Image, digit_kernels: dict, out_path:
         
         # Let's use a strict overlap: if X distance is less than half a digit width.
         min_dist = best['w'] * 0.6
-        
         new_candidates = []
         for c in candidates:
             dist = abs(c['x'] - best['x'])
@@ -123,9 +131,30 @@ def _parse_number_from_region(image: Image.Image, digit_kernels: dict, out_path:
     # Sort final matches by X to read left-to-right
     final_matches.sort(key=lambda c: c['x'])
     
+    # Filter by Horizontal Gap (Contiguity check)
+    # Real numbers should be tightly packed. If there's a large gap (>15px), 
+    # it's likely noise further down the ROI line.
+    if final_matches:
+        filtered = [final_matches[0]]
+        for i in range(1, len(final_matches)):
+            prev = filtered[-1]
+            curr = final_matches[i]
+            # Gap between end of prev and start of curr
+            gap = curr['x'] - (prev['x'] + prev['w'])
+            if gap < 15: # Allow small gaps/kerning, but not large voids
+                filtered.append(curr)
+            else:
+                # Found a break in the chain, ignore rest
+                break
+        final_matches = filtered
+    
     # Construct string
     result_str = "".join([m['d'] for m in final_matches])
     
+    # Debug log
+    if out_path:
+         logging.info(f"[{name}] Result: '{result_str}' from matches: {[(m['d'], m['x'], m['w']) for m in final_matches]}")
+
     # Debug output if requested
     if out_path:
         try:
@@ -149,16 +178,16 @@ def _find_anchors(ss_gray, resource_kernels):
     
     # Include silver and alternate templates in the search
     resources = [
-        ('food', 'food_icon.png'),
-        ('wood', 'wood_icon.png'),
-        ('gold', 'gold_icon.png'),
-        ('stone', 'stone_icon.png'),
-        ('silver', 'silver_icon_macedonia.png'), # Silver only exists in this variant for now
+        ('food', 'food.png'),
+        ('wood', 'wood.png'),
+        ('gold', 'gold.png'),
+        ('stone', 'stone.png'),
+        ('silver', 'silver.png'), # Silver only exists in this variant for now
         
         # Alternate templates for "Macedonia" / low-quality screenshots
-        ('food', 'food_icon_macedonia.png'),
-        ('wood', 'wood_icon_macedonia.png'),
-        ('stone', 'stone_icon_macedonia.png'),
+        ('food', 'food.png'),
+        ('wood', 'wood.png'),
+        ('stone', 'stone.png'),
     ]
     
     for name, fname in resources:
@@ -174,7 +203,8 @@ def _find_anchors(ss_gray, resource_kernels):
             for x, y, score in peaks:
                 # 0. Spatial Restriction: Only consider left strip where icons live
                 # Valid icons are at x=14. x=90 is noise.
-                if x > 60:
+                # Also ignore top bar (y < 220) to avoid confusion with Pop/Idle vills
+                if x > 60 or y < 220:
                     continue
                     
                 # 0. Spatial Prior: Boost score if near expected x=14
@@ -399,9 +429,24 @@ class AlertSound:
             return
 
         logging.info(f"Starting alert sound: {self.sound_file}")
-        # Use a shell loop to repeat the sound indefinitely
-        cmd = f"while true; do afplay '{self.sound_file}'; done"
-        self.process = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid)
+        # Use a simpler loop for Windows, or just play once if loop is tricky in shell
+        # Powershell loop: while ($true) { ... }
+        # Or just playing it repeatedly via Python logic might be safer cross-platform.
+        # But for now, let's try a simpler command that doesn't need setsid.
+        if os.name == 'nt':
+             # Windows: Use powershell to loop sound
+             # Check if file exists
+             if not os.path.exists(self.sound_file):
+                 return
+             
+             # Escape path
+             sound_path = self.sound_file.replace("'", "''")
+             cmd = f'powershell -c "$player = New-Object System.Media.SoundPlayer; $player.SoundLocation=\'{sound_path}\'; while($true) {{ $player.PlaySync(); Start-Sleep -Milliseconds 100 }}"'
+             self.process = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+        else:
+             cmd = f"while true; do afplay '{self.sound_file}'; done"
+             self.process = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid)
+        
         self.is_playing = True
 
     def stop(self):
@@ -411,8 +456,12 @@ class AlertSound:
         logging.info("Stopping alert sound")
         if self.process:
             try:
-                # Kill the process group to ensure the shell loop and afplay both die
-                os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                if os.name == 'nt':
+                    # Windows kill
+                    subprocess.call(['taskkill', '/F', '/T', '/PID', str(self.process.pid)])
+                else:
+                    # Kill the process group to ensure the shell loop and afplay both die
+                    os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
             except Exception:
                 pass
             self.process = None
@@ -423,34 +472,58 @@ def check_villager_production(screenshot, vill_kernel=None):
     """Check if villagers are being produced in the given screenshot."""
     if vill_kernel is None:
         try:
-            vill_kernel = Image.open("/Users/harrisonmcadams/Desktop/villager_icon.png")
+            vill_kernel = Image.open(os.path.join(_KERNEL_PATH, "villager_generic.png"))
         except Exception:
             logging.exception('Could not load villager kernel')
             return False
             
     out_path = None
     try:
-        # Generalized detection: crop to top-left ROI (wider to catch offset queue)
-        # User requested buffer for ~6 slots. 
-        # eco_summary is now 600px wide. Let's search the whole top strip.
-        roi = screenshot.crop((0, 0, 600, 60))
+        # Convert numpy array (from cv2) to PIL Image if needed
+        if not hasattr(screenshot, 'crop'):
+            # Assume it's a numpy array (BGR from cv2.imread)
+            # Convert BGR to RGB
+            screenshot_rgb = cv2.cvtColor(screenshot, cv2.COLOR_BGR2RGB)
+            screenshot = Image.fromarray(screenshot_rgb)
+
+        # Generalized detection: Look in the top portion of the eco_summary.
+        # eco_summary is 400px wide, 480px high.
+        # The global queue is typically at the top of this region.
+        h, w = screenshot.size
+        
+        # Crop vertical strip y=20 to y=200 based on user verification
+        # Ensure we don't go out of bounds
+        crop_top = 20
+        crop_bottom = min(200, h)
+        crop_w = w 
+        
+        if crop_bottom > crop_top:
+            roi = screenshot.crop((0, crop_top, crop_w, crop_bottom))
+        else:
+             # Fallback if image is too small
+            roi = screenshot.crop((0, 0, w, h))
         conv = analyze_ss.convolve_ssXkernel(roi, vill_kernel, out_path=out_path)
         
-        # DEBUG: Print max score
-        # min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(conv)
-        # print(f"DEBUG: Villager Status Max Score: {max_val:.4f}")
+        conv = analyze_ss.convolve_ssXkernel(roi, vill_kernel, out_path=out_path)
         
-        binary = analyze_ss.is_target_in_ss(conv, vill_kernel, out_path=out_path, threshold=0.60) # Lowered to 0.60
-        return binary
+        # Get Max Score
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(conv)
+        # logging.info(f"Villager Score: {max_val:.4f}")
+        
+        # New valid template has 1.0 score matching. Noise is ~0.47.
+        # Safe threshold around 0.70.
+        is_producing = (max_val >= 0.70)
+        
+        return is_producing, max_val
     except Exception:
         logging.exception('Analysis error')
-        return False
+        return False, 0.0
 
 
 def are_vills_producing():
     """Small OpenCV status panel: captures eco_summary and runs villager kernel."""
     try:
-        vill_kernel = Image.open("/Users/harrisonmcadams/Desktop/villager_icon.png")
+        vill_kernel = Image.open(os.path.join(_KERNEL_PATH, "villager_generic.png"))
     except Exception:
         logging.exception('Could not load villager kernel')
         vill_kernel = None
@@ -534,14 +607,14 @@ def summarize_eco(screenshot=None, out_path=None):
     kernelPath = _KERNEL_PATH
 
     resources = [
-        ('food', 'food_icon.png'),
-        ('wood', 'wood_icon.png'),
-        ('gold', 'gold_icon.png'),
-        ('stone', 'stone_icon.png'),
-        ('silver', 'silver_icon_macedonia.png'),
-        ('food', 'food_icon_macedonia.png'),
-        ('wood', 'wood_icon_macedonia.png'),
-        ('stone', 'stone_icon_macedonia.png'),
+        ('food', 'food.png'),
+        ('wood', 'wood.png'),
+        ('gold', 'gold.png'),
+        ('stone', 'stone.png'),
+        ('silver', 'silver.png'),
+        ('food', 'food.png'),
+        ('wood', 'wood.png'),
+        ('stone', 'stone.png'),
     ]
 
     results = {}
@@ -564,8 +637,14 @@ def summarize_eco(screenshot=None, out_path=None):
     if not _CACHED_ANCHORS:
         return {r[0]: None for r in resources}
         
-    # 2. Extract and Parse Counts
+    # Debug visualization
+    if out_path:
+        debug_viz = np.array(screenshot)
+        # Convert RGB to BGR for OpenCV
+        debug_viz = cv_img = cv2.cvtColor(debug_viz, cv2.COLOR_RGB2BGR)
+    
     for name, fname in resources:
+        # ... (Loop setup)
         anchor = _CACHED_ANCHORS.get(name)
         if not anchor:
             results[name] = None
@@ -573,103 +652,113 @@ def summarize_eco(screenshot=None, out_path=None):
             
         ax, ay = anchor
         # Get icon size
-        k_gray = resource_kernels_gray.get(fname)
-        if k_gray is None:
-            results[name] = None
+        k = resource_kernels_gray.get(fname)
+        if k is None:
             continue
-            
-        h, w = k_gray.shape
-        
-        # Define separate regions for Resource Count and Villager Count
-        # We use the "villager separator" icon (person standing) as the delimiter.
-        # It was found at offset ~90px from the resource icon right edge.
-        
+        h, w = k.shape # h, w
+
         # 1. Search for Separator
-        # Look in a strip where we expect it: [ax+w+70, ax+w+110]
-        # Widen search to ensure we catch it
-        sep_search_left = ax + w + 60
-        sep_search_top = ay - 4
-        sep_search_w = 60
-        sep_search_h = h + 8
-        
-        # Ensure bounds
+        # User confirmed separator is in the fallback ROI (yellow/purple boxes).
+        # Fallback was ax + w + 80 (approx ax + 105).
+        # Blob 26 is at x=127. Anchor at x=16. Diff = 110.
+        # So we search [ax + 80, ax + 180]
+        sep_search_left = ax + 80
+        sep_search_top = ay - 10 
+        sep_search_w = 100
+        sep_search_h = h + 20
+        # ... (Bounds clamping)
         sh, sw = ss_gray.shape
         sep_search_left = max(0, min(sw - 1, sep_search_left))
         sep_search_top = max(0, min(sh - 1, sep_search_top))
         sep_search_right = min(sw, sep_search_left + sep_search_w)
         sep_search_bottom = min(sh, sep_search_top + sep_search_h)
         
+        if out_path:
+            # Draw Search Box (Blue)
+            cv2.rectangle(debug_viz, (sep_search_left, sep_search_top), (sep_search_right, sep_search_bottom), (255, 0, 0), 1)
+
         separator_found = False
-        sep_x_rel = 0 # Relative to search strip
+        sep_x_rel = 0
         sep_w_found = 0
         
+        # Search logic ...
         if sep_search_right > sep_search_left and sep_search_bottom > sep_search_top:
             try:
                 sep_strip = ss_gray[sep_search_top:sep_search_bottom, sep_search_left:sep_search_right]
                 # Match template
-                # We need to load it first. It's not in the main dict yet.
-                # Ideally we load it in _init_kernels. For now, let's lazy load or assume it's loaded.
-                # Let's add it to _RESOURCE_KERNELS_GRAY if not present.
                 if 'villager_separator.png' not in resource_kernels_gray:
                      try:
                         kimg = Image.open(os.path.join(_KERNEL_PATH, 'villager_separator.png'))
                         resource_kernels_gray['villager_separator.png'] = np.array(kimg.convert('L'), dtype=np.float32)
-                     except:
-                        pass
+                     except Exception as e:
+                        logging.error(f"Failed to load separator: {e}")
                 
                 k_sep = resource_kernels_gray.get('villager_separator.png')
                 if k_sep is not None:
                     res_conv = analyze_ss.match_template_arrays(sep_strip, k_sep)
-                    found, peaks = analyze_ss.is_target_in_ss(res_conv, None, return_peaks=True, threshold=0.6)
+                    found, peaks = analyze_ss.is_target_in_ss(res_conv, None, return_peaks=True, threshold=0.5)
                     if found and peaks:
                         # Take the best match
                         peaks.sort(key=lambda p: p[2], reverse=True)
-                        px, py, _ = peaks[0]
+                        px, py, score = peaks[0]
                         separator_found = True
                         sep_x_rel = int(px)
                         sep_w_found = k_sep.shape[1]
-            except Exception:
-                pass
+                        
+                        if out_path:
+                            # Draw Match Box (Green)
+                            abs_x = sep_search_left + sep_x_rel
+                            abs_y = sep_search_top + int(py)
+                            cv2.rectangle(debug_viz, (abs_x, abs_y), (abs_x + sep_w_found, abs_y + k_sep.shape[0]), (0, 255, 0), 2)
+            except Exception as e:
+                logging.exception(f"Separator search error: {e}")
 
-        # 2. Define ROIs based on Separator or Fallback
+        # 2. ROI Definitions
         if separator_found:
-            # Separator absolute X
-            sep_abs_x = sep_search_left + sep_x_rel
-            
-            # Resource ROI: Ends before separator
-            res_roi_left = ax + w - 5
-            res_roi_right = sep_abs_x - 2 # Padding
-            res_roi_top = ay - fudge_factor
-            res_roi_bottom = ay + h + fudge_factor
-            
+             sep_abs_x = sep_search_left + sep_x_rel
+             
+             res_roi_left = ax + w - 5
+             res_roi_right = sep_abs_x - 2 
+             res_roi_top = ay - fudge_factor
+             res_roi_bottom = ay + h + fudge_factor
             # Villager ROI: Starts after separator
-            vill_roi_left = sep_abs_x + sep_w_found + 2 # Padding
-            vill_roi_right = vill_roi_left + 50 # Assume max width
-            vill_roi_top = ay - fudge_factor
-            vill_roi_bottom = ay + h + fudge_factor
-            
+             vill_roi_left = sep_abs_x + sep_w_found + 10 # Reduced Padding to ensure we catch the '0' at x=156
+             vill_roi_right = vill_roi_left + 50 # Assume max width
+             vill_roi_top = ay - fudge_factor
+             vill_roi_bottom = ay + h + fudge_factor
         else:
-            # Fallback to hardcoded offsets (from previous step)
-            res_roi_left = ax + w - 5 
-            res_roi_top = ay - fudge_factor
-            res_roi_w = 75 
-            res_roi_h = h + fudge_factor * 2
-            res_roi_right = res_roi_left + res_roi_w
-            res_roi_bottom = res_roi_top + res_roi_h
-            
-            vill_roi_left = ax + w + 80 
-            vill_roi_top = ay - fudge_factor
-            vill_roi_w = 50 
-            vill_roi_h = h + fudge_factor * 2
-            vill_roi_right = vill_roi_left + vill_roi_w
-            vill_roi_bottom = vill_roi_top + vill_roi_h
-        
-        # Ensure bounds for Resource ROI
+             # Fallback
+             res_roi_left = ax + w - 5
+             res_roi_top = ay - fudge_factor
+             res_roi_w = 75
+             res_roi_h = h + fudge_factor * 2
+             res_roi_right = res_roi_left + res_roi_w
+             res_roi_bottom = res_roi_top + res_roi_h
+             
+             vill_roi_left = ax + w + 80
+             vill_roi_top = ay - fudge_factor
+             vill_roi_w = 50
+             vill_roi_h = h + fudge_factor * 2
+             vill_roi_right = vill_roi_left + vill_roi_w
+             vill_roi_bottom = vill_roi_top + vill_roi_h
+
+        # Bounds ...
         res_roi_left = max(0, min(sw - 1, res_roi_left))
         res_roi_top = max(0, min(sh - 1, res_roi_top))
         res_roi_right = min(sw, res_roi_right)
         res_roi_bottom = min(sh, res_roi_bottom)
         
+        vill_roi_left = max(0, min(sw - 1, vill_roi_left))
+        vill_roi_top = max(0, min(sh - 1, vill_roi_top))
+        vill_roi_right = min(sw, vill_roi_right)
+        vill_roi_bottom = min(sh, vill_roi_bottom)
+
+        if out_path:
+            # Draw ROIs (Yellow for Res, Magenta for Vill)
+            cv2.rectangle(debug_viz, (res_roi_left, res_roi_top), (res_roi_right, res_roi_bottom), (0, 255, 255), 1)
+            cv2.rectangle(debug_viz, (vill_roi_left, vill_roi_top), (vill_roi_right, vill_roi_bottom), (255, 0, 255), 1)
+
+        # Extraction logic (kept same, just indented/cleaned)
         # Extract Resource Count
         if res_roi_right > res_roi_left and res_roi_bottom > res_roi_top:
             try:
@@ -681,16 +770,10 @@ def summarize_eco(screenshot=None, out_path=None):
         else:
             results[name] = None
 
-        # Extract Villager Count (Skip for Silver)
+        # Extract Villager Count
         if name == 'silver':
             results[f'{name}_vills'] = None
         else:
-            # Ensure bounds for Villager ROI
-            vill_roi_left = max(0, min(sw - 1, vill_roi_left))
-            vill_roi_top = max(0, min(sh - 1, vill_roi_top))
-            vill_roi_right = min(sw, vill_roi_right)
-            vill_roi_bottom = min(sh, vill_roi_bottom)
-            
             if vill_roi_right > vill_roi_left and vill_roi_bottom > vill_roi_top:
                 try:
                     vill_img = screenshot.crop((vill_roi_left, vill_roi_top, vill_roi_right, vill_roi_bottom))
@@ -700,7 +783,11 @@ def summarize_eco(screenshot=None, out_path=None):
                     results[f'{name}_vills'] = None
             else:
                 results[f'{name}_vills'] = None
+                
+    if out_path:
+        cv2.imwrite(os.path.join(out_path, "debug_separator_viz.png"), debug_viz)
 
+    return results
     return results
 
 
@@ -736,9 +823,9 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
 
     # Load villager kernel for status check
     try:
-        vill_kernel = Image.open("/Users/harrisonmcadams/Desktop/villager_icon.png")
+        vill_kernel = Image.open(os.path.join(_KERNEL_PATH, "villager_generic.png"))
     except Exception:
-        logging.warning("Could not load villager_icon.png for status check")
+        logging.warning("Could not load villager_generic.png for status check")
         vill_kernel = None
 
     # Allow widening of the kept history window by a multiplicative factor.
@@ -1369,9 +1456,13 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                 
                     # Check villager production only when active
                     try:
-                        current_vill_status = check_villager_production(screenshot, vill_kernel)
+                        current_vill_status, vill_score = check_villager_production(screenshot, vill_kernel)
+                        # Log if it's borderline (e.g. between 0.4 and 0.6) to help debug
+                        if 0.4 < vill_score < 0.6:
+                             logging.info(f"Villager Queue Score: {vill_score:.4f} (Status: {current_vill_status})")
                     except Exception:
                         current_vill_status = False
+                        vill_score = 0.0
                     
                     if not current_vill_status:
                         alert_sound.start()
