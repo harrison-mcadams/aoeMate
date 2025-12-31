@@ -36,7 +36,9 @@ It provides a live **visual overlay** of your economy and an **audio alert** if 
 3.  **Template Configuration**:
     The system relies on a set of reference icons in the `templates/` directory.
 
-    - **Required Files**: `food.png`, `wood.png`, `gold.png`, `stone.png`, `villager_generic.png`, `villager_separator.png`.
+    - **Required Files**: `food.png`, `wood.png`, `gold.png`, `stone.png`, `villager_separator.png`.
+    - **Villager Icons**: At least one `villager_*.png` file (e.g., `villager_generic.png`).
+      - **Multi-Civ Support**: The system automatically detects ALL `villager_*.png` files (except `villager_separator.png`) and tries to match against each. This means you can add civ-specific villager templates like `villager_delhi.png`, `villager_english.png`, etc. for better detection accuracy.
     - **Digits**: `0.png` through `9.png`.
 
     **To Add/Update Templates**:
@@ -46,6 +48,15 @@ It provides a live **visual overlay** of your economy and an **audio alert** if 
     3.  Crop significantly tightly around the icon or number.
     4.  Save as a `.png` file in the `templates/` folder.
         _Note: The system is sensitive to the exact pixel structure, so ensure screenshots are from the same resolution used for playing (e.g., 2560x1600)._
+
+    **Adding Civ-Specific Villager Templates**:
+
+    If villager detection isn't working for a specific civilization:
+
+    1.  Play a game as that civ and take a screenshot showing the villager queue icon in the top-left.
+    2.  Crop the villager icon tightly (it shows the villager queuing in your TC).
+    3.  Save as `villager_<civname>.png` (e.g., `villager_mongols.png`, `villager_abbasid.png`).
+    4.  Restart aoeMate - it will automatically load and use the new template.
 
 ---
 
@@ -90,7 +101,9 @@ If you see resource counts like `10500` instead of `500`, the system might be de
 
 ### Villager Queue Not Detecting
 
-- **Check the template**: Ensure `templates/villager_generic.png` matches your current in-game icon (with or without the number overlay).
+- **Add your civ's template**: Different civilizations have different villager icons. If detection isn't working, add a `villager_<yourciv>.png` template (see Template Configuration above).
+- **Check existing templates**: Ensure at least one `villager_*.png` in `templates/` roughly matches your in-game icon.
+- **Check the logs**: When aoeMate starts, it logs which villager templates were loaded. Look for lines like `Loaded villager template(s): [...]`.
 - **Threshold**: The detection threshold is set in `main.py` (currently `0.70`). If it fails to trigger, you might need to lower this, but `0.70` is tuned for high-confidence matching.
 
 ### Capture Region is Wrong

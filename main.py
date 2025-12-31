@@ -43,6 +43,45 @@ _MAX_WORKERS = max(2, min(8, (os.cpu_count() or 4)))
 _EX_DIGITS = None
 _EX_RESOURCES = None
 _CACHED_ANCHORS = None  # {name: (x, y)} relative to eco_summary
+_VILLAGER_KERNELS = None  # List of (name, PIL.Image) for all villager templates
+_VILLAGER_KERNELS_LOCK = threading.Lock()
+
+
+def _load_villager_kernels():
+    """Load all villager template images (villager_*.png except separator).
+    
+    Returns a list of (template_name, PIL.Image) tuples.
+    Cached after first load.
+    """
+    global _VILLAGER_KERNELS
+    if _VILLAGER_KERNELS is not None:
+        return _VILLAGER_KERNELS
+    
+    with _VILLAGER_KERNELS_LOCK:
+        if _VILLAGER_KERNELS is not None:
+            return _VILLAGER_KERNELS
+        
+        kernels = []
+        try:
+            for fname in os.listdir(_KERNEL_PATH):
+                # Match villager_*.png but exclude separator
+                if fname.startswith('villager_') and fname.endswith('.png') and 'separator' not in fname.lower():
+                    try:
+                        img = Image.open(os.path.join(_KERNEL_PATH, fname))
+                        kernels.append((fname, img))
+                        logging.info(f"Loaded villager template: {fname}")
+                    except Exception as e:
+                        logging.warning(f"Could not load villager template {fname}: {e}")
+        except Exception as e:
+            logging.exception(f"Error scanning for villager templates: {e}")
+        
+        if not kernels:
+            logging.warning("No villager templates found! Detection will not work.")
+        else:
+            logging.info(f"Loaded {len(kernels)} villager template(s): {[k[0] for k in kernels]}")
+        
+        _VILLAGER_KERNELS = kernels
+        return _VILLAGER_KERNELS
 
 
 def _parse_number_from_region(image: Image.Image, digit_kernels: dict, out_path: str = None, name: str = "debug") -> List[str]:
@@ -468,14 +507,32 @@ class AlertSound:
         self.is_playing = False
 
 
-def check_villager_production(screenshot, vill_kernel=None):
-    """Check if villagers are being produced in the given screenshot."""
-    if vill_kernel is None:
-        try:
-            vill_kernel = Image.open(os.path.join(_KERNEL_PATH, "villager_generic.png"))
-        except Exception:
-            logging.exception('Could not load villager kernel')
-            return False
+def check_villager_production(screenshot, vill_kernels=None):
+    """Check if villagers are being produced in the given screenshot.
+    
+    Tries all available villager templates (for different civs) and returns
+    True if ANY template matches above the threshold.
+    
+    Handles two key challenges:
+    1. Resolution differences: Wiki icons are 96x96, in-game may be ~28x28
+       - Uses multi-scale matching to try different template sizes
+    2. Queue number overlay: In-game icons have white numbers (1, 2, 3...) in top-left
+       - Masks out the top-left corner of templates before matching
+    
+    Args:
+        screenshot: PIL Image or numpy array (BGR) of the eco_summary region
+        vill_kernels: Optional list of (name, PIL.Image) tuples. If None, loads all.
+    
+    Returns:
+        Tuple of (is_producing: bool, max_score: float)
+    """
+    # Load all villager templates if not provided
+    if vill_kernels is None:
+        vill_kernels = _load_villager_kernels()
+    
+    if not vill_kernels:
+        logging.warning("No villager kernels available for detection")
+        return False, 0.0
             
     out_path = None
     try:
@@ -502,19 +559,91 @@ def check_villager_production(screenshot, vill_kernel=None):
         else:
              # Fallback if image is too small
             roi = screenshot.crop((0, 0, w, h))
-        conv = analyze_ss.convolve_ssXkernel(roi, vill_kernel, out_path=out_path)
         
-        conv = analyze_ss.convolve_ssXkernel(roi, vill_kernel, out_path=out_path)
+        # Convert ROI to grayscale numpy for matching
+        roi_gray = np.array(roi.convert('L'), dtype=np.float32)
+        roi_h, roi_w = roi_gray.shape
         
-        # Get Max Score
-        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(conv)
-        # logging.info(f"Villager Score: {max_val:.4f}")
+        # Target size for in-game icons (approximate)
+        # The in-game villager icon is roughly 28x28 based on your template
+        TARGET_SIZE = 28
         
-        # New valid template has 1.0 score matching. Noise is ~0.47.
-        # Safe threshold around 0.70.
-        is_producing = (max_val >= 0.70)
+        # Multi-scale factors to try
+        # If template is 96x96 and we need ~28x28, that's scale ~0.29
+        # We try a range of scales to find the best match
+        SCALES = [0.25, 0.30, 0.35, 0.40, 0.50, 0.75, 1.0]
         
-        return is_producing, max_val
+        # Try all villager templates and find the best match
+        best_score = 0.0
+        best_template = None
+        best_scale = 1.0
+        
+        for template_name, vill_kernel in vill_kernels:
+            try:
+                # Get template as grayscale numpy
+                template_gray = np.array(vill_kernel.convert('L'), dtype=np.float32)
+                template_h, template_w = template_gray.shape
+                
+                # Determine which scales to try based on template size
+                if template_w > 50:  # Large wiki template
+                    scales_to_try = SCALES
+                else:  # Already in-game sized
+                    scales_to_try = [1.0, 0.9, 1.1]
+                
+                for scale in scales_to_try:
+                    # Resize template
+                    new_w = max(10, int(template_w * scale))
+                    new_h = max(10, int(template_h * scale))
+                    
+                    # Skip if template would be larger than ROI
+                    if new_w >= roi_w or new_h >= roi_h:
+                        continue
+                    
+                    if scale != 1.0:
+                        resized = cv2.resize(template_gray, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                    else:
+                        resized = template_gray
+                    
+                    # Mask out the top-left corner where queue numbers appear
+                    # The number typically occupies about 40% of the width and 35% of the height
+                    # in the top-left corner. We zero out this region in the template.
+                    masked = resized.copy()
+                    mask_w = int(new_w * 0.40)
+                    mask_h = int(new_h * 0.35)
+                    # Instead of zeroing (which could cause issues), we use the mean value
+                    # This makes the masked region "neutral" in correlation
+                    mean_val = np.mean(resized)
+                    masked[:mask_h, :mask_w] = mean_val
+                    
+                    # Also try without masking (for templates without number overlay)
+                    for use_mask, tmpl in [(True, masked), (False, resized)]:
+                        try:
+                            res = cv2.matchTemplate(roi_gray, tmpl, cv2.TM_CCOEFF_NORMED)
+                            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+                            
+                            if max_val > best_score:
+                                best_score = max_val
+                                best_template = template_name
+                                best_scale = scale
+                        except cv2.error:
+                            # Template larger than image, skip
+                            continue
+                            
+            except Exception as e:
+                logging.warning(f"Error matching template {template_name}: {e}")
+                continue
+        
+        # Log which template matched best (useful for debugging civ detection)
+        if best_score > 0.5:  # Only log meaningful matches
+            logging.info(f"Best villager match: {best_template} @ scale {best_scale:.2f} with score {best_score:.4f}")
+        
+        # Threshold: 0.70 for exact matches, but we may need lower for
+        # cross-resolution matching. 0.55 seems reasonable for scaled wiki icons.
+        # Use 0.60 as a balance between sensitivity and false positives.
+        DETECTION_THRESHOLD = 0.60
+        is_producing = (best_score >= DETECTION_THRESHOLD)
+        
+        return is_producing, best_score
     except Exception:
         logging.exception('Analysis error')
         return False, 0.0
@@ -522,11 +651,10 @@ def check_villager_production(screenshot, vill_kernel=None):
 
 def are_vills_producing():
     """Small OpenCV status panel: captures eco_summary and runs villager kernel."""
-    try:
-        vill_kernel = Image.open(os.path.join(_KERNEL_PATH, "villager_generic.png"))
-    except Exception:
-        logging.exception('Could not load villager kernel')
-        vill_kernel = None
+    # Load all villager templates for multi-civ support
+    vill_kernels = _load_villager_kernels()
+    if not vill_kernels:
+        logging.error('No villager templates found!')
 
     cv2.namedWindow('AOEMate', cv2.WINDOW_NORMAL)
     cv2.resizeWindow('AOEMate', 200, 100)
@@ -554,12 +682,13 @@ def are_vills_producing():
             eco_summary = get_ss.get_bbox('eco_summary')
             screenshot = get_ss.capture_gfn_screen_region(eco_summary)
             
-            binary = check_villager_production(screenshot, vill_kernel)
+            # check_villager_production now returns (is_producing, score) tuple
+            is_producing, score = check_villager_production(screenshot, vill_kernels)
 
-            color = (0, 255, 0) if binary else (0, 0, 255)
+            color = (0, 255, 0) if is_producing else (0, 0, 255)
             status = np.full((win_h, win_w, 3), color, dtype=np.uint8)
 
-            label = 'Producing' if binary else 'Not producing'
+            label = 'Producing' if is_producing else 'Not producing'
             font = cv2.FONT_HERSHEY_SIMPLEX
             base_scale = max(1.0, min(win_w, win_h) / 400.0)
             thickness = max(2, int(base_scale))
@@ -821,12 +950,10 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
     except Exception:
         pass
 
-    # Load villager kernel for status check
-    try:
-        vill_kernel = Image.open(os.path.join(_KERNEL_PATH, "villager_generic.png"))
-    except Exception:
-        logging.warning("Could not load villager_generic.png for status check")
-        vill_kernel = None
+    # Load all villager templates for multi-civ support
+    vill_kernels = _load_villager_kernels()
+    if not vill_kernels:
+        logging.warning("No villager templates found for status check")
 
     # Allow widening of the kept history window by a multiplicative factor.
     # Default is 1.2 (20% wider than `max_points`). Can be overridden via
@@ -1456,7 +1583,7 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                 
                     # Check villager production only when active
                     try:
-                        current_vill_status, vill_score = check_villager_production(screenshot, vill_kernel)
+                        current_vill_status, vill_score = check_villager_production(screenshot, vill_kernels)
                         # Log if it's borderline (e.g. between 0.4 and 0.6) to help debug
                         if 0.4 < vill_score < 0.6:
                              logging.info(f"Villager Queue Score: {vill_score:.4f} (Status: {current_vill_status})")
