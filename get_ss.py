@@ -19,6 +19,14 @@ def get_bbox(behavior):
         # - Top moved up (was 850, now 600) to capture more above.
         # - Width reduced (was 600, now 400) to avoid excess.
         # - Height adjusted (was 350) to fit 1080p screen (600+480=1080).
+        # Dynamic check is tricky without passing monitor info, but let's assume standard layout.
+        # Ideally, we should detect resolution. For now, rely on default bbox being for 1080p height
+        # unless overridden or we can detect context. 
+        # Actually, get_bbox is called before we pick the monitor in main(), but we can check resolution here if we want.
+        # But capture_gfn_screen_region picks the monitor.
+        # Let's RETURN a "relative" box or handle scaling in capture.
+        # Better yet, let capture helper pass the resolution to this function?
+        # For simplicity in this quick fix script:
         return {'top': 600, 'left': 0, 'width': 400, 'height': 480}
     elif behavior == 'gfn_in_game':
         return {'top': 850, 'left': 0, 'width': 300, 'height': 350}
@@ -50,12 +58,36 @@ def capture_gfn_screen_region(bbox, *, out_path: Optional[str] = None):
             mon_idx = 0 # Fallback
             
         mon = sct.monitors[mon_idx]
-
+        # logging.info(f"Capturing from monitor {mon_idx}: {mon}")
+        
+        # Adjust bbox for 4K if detected (Height > 1440)
+        # Note: bbox passed in is hardcoded for 1080p (Height 1080)
+        # 1080p: top=600 (bottom-480). 
+        # 4K (2160p): Equivalent bottom region would be top = 2160 - X.
+        # UI Scaling usually makes it bigger. Let's start with a heuristic:
+        # If 4K, aim for bottom left with proportionate or fixed size.
+        
+        adjusted_bbox = bbox.copy()
+        if mon['height'] > 1440:
+             # Assuming 4K
+             # Position at bottom left.
+             # Standard capture height was 480. 
+             # On 4K with scaling, it might be roughly same pixel count if 'pixel perfect', 
+             # but usually UI is scaled 2x so it takes more pixels? 
+             # Or UI is same visual size, so 2x pixels.
+             # Let's try grabbing a larger chunk at the bottom left.
+             # Let's try grabbing a larger chunk at the bottom left.
+             adjusted_bbox['height'] = 1200  # Increased height
+             adjusted_bbox['width'] = 1600   # Increased width to catch everything
+             # adjusted_bbox['top'] = mon['height'] - adjusted_bbox['height'] - 100 # buffer from bottom? 
+             # Actually, AoE4 UI usually flush bottom.
+             adjusted_bbox['top'] = mon['height'] - adjusted_bbox['height']
+             
         monitor_bbox = {
-            'top': mon['top'] + bbox['top'],
-            'left': mon['left'] + bbox['left'],
-            'width': bbox['width'],
-            'height': bbox['height']
+            'top': mon['top'] + adjusted_bbox['top'],
+            'left': mon['left'] + adjusted_bbox['left'],
+            'width': adjusted_bbox['width'],
+            'height': adjusted_bbox['height']
         }
 
         # The bounding box to capture

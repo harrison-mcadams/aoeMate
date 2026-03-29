@@ -211,7 +211,7 @@ def _parse_number_from_region(image: Image.Image, digit_kernels: dict, out_path:
     return [result_str] if result_str else []
 
 
-def _find_anchors(ss_gray, resource_kernels):
+def _find_anchors(ss_gray, resource_kernels, scale_factor=1.0):
     """Find resource icons in the screenshot with conflict resolution and vertical alignment enforcement."""
     candidates = []
     
@@ -241,16 +241,17 @@ def _find_anchors(ss_gray, resource_kernels):
         if found and peaks:
             for x, y, score in peaks:
                 # 0. Spatial Restriction: Only consider left strip where icons live
-                # Valid icons are at x=14. x=90 is noise.
-                # Also ignore top bar (y < 220) to avoid confusion with Pop/Idle vills
-                if x > 60 or y < 220:
+                # Valid icons are typicaly at x=14 or x=28 (4K). 
+                # Relaxed x constraint from 100 to 160 (to be safe for 4K).
+                # Relaxed y constraint from 220 to 50 (only skip very top edge).
+                if x > 160 or y < 50:
                     continue
                     
                 # 0. Spatial Prior: Boost score if near expected x=14
                 dist_from_expected = abs(x - 14)
-                if dist_from_expected < 5:
+                if dist_from_expected < 10: # Relaxed from 5 to 10
                     score += 0.2 # Significant boost for being in the right spot
-                elif dist_from_expected < 10:
+                elif dist_from_expected < 20: # Relaxed from 10 to 20
                     score += 0.1
                     
                 candidates.append({'name': name, 'score': score, 'x': int(x), 'y': int(y)})
@@ -311,7 +312,7 @@ def _find_anchors(ss_gray, resource_kernels):
         col['total_score'] = sum(cand['score'] for cand in col['candidates'])
         col['has_food'] = any(cand['name'] == 'food' for cand in col['candidates'])
         avg_x = col['x_sum'] / col['count']
-        col['is_aligned'] = abs(avg_x - 14) < 15
+        col['is_aligned'] = abs(avg_x - 14) < 30 # Relaxed from 15 to 30
         
     # Sort: IsAligned DESC, HasFood DESC, Count DESC, TotalScore DESC
     columns.sort(key=lambda col: (col['is_aligned'], col['has_food'], col['count'], col['total_score']), reverse=True)
@@ -342,7 +343,9 @@ def _find_anchors(ss_gray, resource_kernels):
             curr = final_candidates[i]
             dist = curr['y'] - prev['y']
             
-            if dist < 80: # Max allowed gap
+            # Scale-dependent gap threshold
+            MAX_GAP = 55.0 * scale_factor
+            if dist < MAX_GAP: # Dynamic gap
                 current_group.append(curr)
             else:
                 groups.append(current_group)
@@ -376,15 +379,84 @@ def _find_anchors(ss_gray, resource_kernels):
             # If max is 0.8, we discard < 0.6.
             final_candidates = [c for c in final_candidates if c['score'] >= 0.75 * max_score]
 
-    # 5. Final Dictionary Construction
+        # 4.5. Re-Verification of Spacing after Filtering
+        # Removing weak candidates might have created gaps. We must re-check spacing.
+        final_candidates.sort(key=lambda c: c['y'])
+        if len(final_candidates) > 1:
+            groups = []
+            current_group = [final_candidates[0]]
+            for i in range(1, len(final_candidates)):
+                prev = final_candidates[i-1]
+                curr = final_candidates[i]
+                dist = curr['y'] - prev['y']
+                
+                # Use same gap logic
+                if 'MAX_GAP' not in locals(): MAX_GAP = 55.0 * scale_factor
+                
+                if dist < MAX_GAP:
+                    current_group.append(curr)
+                else:
+                    groups.append(current_group)
+                    current_group = [curr]
+            groups.append(current_group)
+            
+            # Pick best group again
+            best_group = []
+            best_score = (-1, -1, -1)
+            for g in groups:
+                has_food = any(c['name'] == 'food' for c in g)
+                count = len(g)
+                total_score = sum(c['score'] for c in g)
+                score = (1 if has_food else 0, count, total_score)
+                if score > best_score:
+                    best_score = score
+                    best_group = g
+            
+            final_candidates = best_group
+
+    # 5. Vertical Ordering Enforcement & Labeling
+    # Instead of trusting the template label (which confused Wood with Pop),
+    # we use the known vertical order in AOE4 (Pop top-most, then Food, Wood, Gold, Stone).
+    # We only take the top 5 candidates in the best column.
+    
+    final_candidates.sort(key=lambda c: c['y'])
+    
+    # Typical AOE4 Resource Panel (Top to Bottom):
+    # 0. Population (House icon)
+    # 1. Food
+    # 2. Wood
+    # 3. Gold
+    # 4. Stone
+    # (Optional 5. Olive Oil/Silver)
+
     anchors = {}
-    for c in final_candidates:
-        # If we have duplicates for same name in the column (unlikely with NMS but possible if vertical spacing is large),
-        # take the first one (highest score).
-        if c['name'] not in anchors:
-             # Sanity check: Resource icons should be on the left side
-             if c['x'] < 100:
-                anchors[c['name']] = (c['x'], c['y'])
+    
+    # If we have 5 candidates, first one is likely Pop, skip it for resources
+    # If we have 4, the first one might be Food or Pop. 
+    # Let's be smart: if the gap between first and second is small (~70px), they are part of the set.
+    # If the first one is significantly above where we expect Food (y < 280?), it might be Pop.
+    
+    effective_start = 0
+    if len(final_candidates) >= 5:
+        # Most likely has Pop icon at the top
+        effective_start = 1
+    elif len(final_candidates) == 4:
+        # Could be Food-Wood-Gold-Stone OR Pop-Food-Wood-Gold
+        # Check first candidate's Y. Resources usually start lower.
+        if final_candidates[0]['y'] < 280:
+             # Likely Pop icon
+             effective_start = 1
+             
+    resource_order = ['food', 'wood', 'gold', 'stone', 'silver']
+    for i in range(effective_start, len(final_candidates)):
+        idx_in_order = i - effective_start
+        if idx_in_order < len(resource_order):
+            name = resource_order[idx_in_order]
+            c = final_candidates[i]
+            anchors[name] = (c['x'], c['y'])
+
+    # Log what we actually assigned to help debug
+    # logging.info(f"Assigned anchors: {anchors}")
                 
     # 6. Sanity Check: Minimum Resources
     # If we only found 1 resource, it's likely a false positive (noise).
@@ -548,10 +620,14 @@ def check_villager_production(screenshot, vill_kernels=None):
         # The global queue is typically at the top of this region.
         h, w = screenshot.size
         
-        # Crop vertical strip y=20 to y=200 based on user verification
-        # Ensure we don't go out of bounds
-        crop_top = 20
-        crop_bottom = min(200, h)
+        # Crop vertical strip based on image height.
+        # On 1080p (h=480), we captured y=20 to y=200.
+        # On 4K (h=960), we want roughly y=40 to y=400.
+        # Let's say top 5% to top 45%?
+        # 20/480 = 4%, 200/480 = ~41%.
+        # So using proportions is safer.
+        crop_top = int(h * 0.04)
+        crop_bottom = int(h * 0.45)
         crop_w = w 
         
         if crop_bottom > crop_top:
@@ -571,7 +647,7 @@ def check_villager_production(screenshot, vill_kernels=None):
         # Multi-scale factors to try
         # If template is 96x96 and we need ~28x28, that's scale ~0.29
         # We try a range of scales to find the best match
-        SCALES = [0.25, 0.30, 0.35, 0.40, 0.50, 0.75, 1.0]
+        SCALES = [0.25, 0.30, 0.35, 0.40, 0.50, 0.55, 0.60, 0.65, 0.75, 1.0]
         
         # Try all villager templates and find the best match
         best_score = 0.0
@@ -637,10 +713,9 @@ def check_villager_production(screenshot, vill_kernels=None):
         if best_score > 0.5:  # Only log meaningful matches
             logging.info(f"Best villager match: {best_template} @ scale {best_scale:.2f} with score {best_score:.4f}")
         
-        # Threshold: 0.70 for exact matches, but we may need lower for
-        # cross-resolution matching. 0.55 seems reasonable for scaled wiki icons.
-        # Use 0.60 as a balance between sensitivity and false positives.
-        DETECTION_THRESHOLD = 0.60
+        # Threshold: 0.75 to capture matches in the 0.77-0.79 range seen in logs.
+        # True positives were narrowly missing the 0.80 cutoff.
+        DETECTION_THRESHOLD = 0.75
         is_producing = (best_score >= DETECTION_THRESHOLD)
         
         return is_producing, best_score
@@ -657,6 +732,7 @@ def are_vills_producing():
         logging.error('No villager templates found!')
 
     cv2.namedWindow('AOEMate', cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty('AOEMate', cv2.WND_PROP_TOPMOST, 1)
     cv2.resizeWindow('AOEMate', 200, 100)
 
     poll_ms = int(os.environ.get('AOEMATE_POLL_MS', '100'))
@@ -676,6 +752,10 @@ def are_vills_producing():
     win_h = int(int(os.environ.get('AOEMATE_WIN_H', str(int(screen_h * 0.5)))))
     win_x = int(os.environ.get('AOEMATE_WIN_X', str((screen_w - win_w) // 2)))
     win_y = int(os.environ.get('AOEMATE_WIN_Y', str((screen_h - win_h) // 2)))
+
+    logging.info(f"Window Geometry: {win_w}x{win_h} at +{win_x}+{win_y}")
+
+    logging.info(f"Window Geometry: {win_w}x{win_h} at +{win_x}+{win_y}")
 
     try:
         while True:
@@ -735,6 +815,13 @@ def summarize_eco(screenshot=None, out_path=None):
     # Allow kernel path to be overridden with env var AOE_KERNEL_PATH
     kernelPath = _KERNEL_PATH
 
+    # Detect scale based on image width (400px is standard 1080p capture, >600 implies 4K/2x)
+    scale_factor = 1.0
+    if screenshot.width > 600:
+        scale_factor = 2.0
+    
+    # logging.info(f"summarize_eco: scale_factor={scale_factor} (width={screenshot.width})")
+
     resources = [
         ('food', 'food.png'),
         ('wood', 'wood.png'),
@@ -755,14 +842,89 @@ def summarize_eco(screenshot=None, out_path=None):
     digit_kernels_gray = _DIGIT_KERNELS_GRAY
     
     ss_gray = np.array(screenshot.convert('L'), dtype=np.float32)
+
+    # Scale digit kernels if 4K
+    if scale_factor > 1.5:
+        # Generate 2x kernels on the fly (cached if possible, but fast enough to resize 10 small imgs)
+        # We append them to the dict with the same keys? No, collisions.
+        # We replace them? If the whole UI is 2x, digits are 2x.
+        # Let's replace them for this call scope (copy dict first)
+        original_kernels = digit_kernels_gray
+        digit_kernels_gray = {}
+        for k, v in original_kernels.items():
+            if v is not None:
+                # Resize to 2x - Use INTER_NEAREST to preserve sharp edges for pixel art digits
+                v_2x = cv2.resize(v, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST)
+                digit_kernels_gray[k] = v_2x
+            else:
+                digit_kernels_gray[k] = None
+
+        # Also scale resource kernels (crucial for separator!)
+        original_res_kernels = resource_kernels_gray
+        resource_kernels_gray = {}
+        for k, v in original_res_kernels.items():
+            if v is not None:
+                v_2x = cv2.resize(v, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST)
+                resource_kernels_gray[k] = v_2x
+            else:
+                resource_kernels_gray[k] = None
+        
+        # Ensure villager_separator is loaded and scaled (it's not in 'resources' list)
+        sep_name = 'villager_separator.png'
+        if sep_name not in resource_kernels_gray:
+            # Try to get from global cache first
+            k_sep = None
+            if sep_name in _RESOURCE_KERNELS_GRAY and _RESOURCE_KERNELS_GRAY[sep_name] is not None:
+                k_sep = _RESOURCE_KERNELS_GRAY[sep_name]
+            else:
+                # Load from disk on demand
+                try:
+                    kpath = os.path.join(_KERNEL_PATH, sep_name)
+                    if os.path.exists(kpath):
+                         kimg = Image.open(kpath)
+                         k_sep = np.array(kimg.convert('L'), dtype=np.float32)
+                         # Optionally cache it back effectively? No need, local is fine.
+                except Exception:
+                    pass
+            
+            # Scale if found
+            if k_sep is not None:
+                 k_sep_scaled = cv2.resize(k_sep, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST)
+                 resource_kernels_gray[sep_name] = k_sep_scaled
+            else:
+                 resource_kernels_gray[sep_name] = None
     
     # 1. Dynamic Anchoring
-    if _CACHED_ANCHORS is None:
-        logging.info("Finding anchors...")
-        _CACHED_ANCHORS = _find_anchors(ss_gray, resource_kernels_gray)
-        logging.info("Found anchors: %s", _CACHED_ANCHORS)
-        
-    # If we still don't have anchors (e.g. black screen), we can't do anything
+    # If we don't have anchors, OR it's been a while, try to find them.
+    # We use a timestamp to avoid hammering the search if it's failing in the menu.
+    now = time.time()
+    if not hasattr(summarize_eco, '_last_anchor_attempt'):
+        summarize_eco._last_anchor_attempt = 0
+    
+    should_search = False
+    if not _CACHED_ANCHORS:
+        # If we have no anchors, retry every 2 seconds
+        if now - summarize_eco._last_anchor_attempt > 2.0:
+            should_search = True
+    else:
+        # Even if we have anchors, re-verify them every 60 seconds in case of UI shift
+        if now - summarize_eco._last_anchor_attempt > 60.0:
+            should_search = True
+            
+    if should_search:
+        summarize_eco._last_anchor_attempt = now
+        # logging.info("Searching for anchors...")
+        new_anchors = _find_anchors(ss_gray, resource_kernels_gray, scale_factor=scale_factor)
+        if new_anchors:
+            if new_anchors != _CACHED_ANCHORS:
+                logging.info("Found/Updated anchors: %s", new_anchors)
+                _CACHED_ANCHORS = new_anchors
+        else:
+            if _CACHED_ANCHORS:
+                logging.warning("Lost anchors! Game might be paused or UI shifted.")
+                _CACHED_ANCHORS = None # Force full reset
+    
+    # If we still don't have anchors (e.g. black screen or menu), we can't do anything
     if not _CACHED_ANCHORS:
         return {r[0]: None for r in resources}
         
@@ -791,10 +953,18 @@ def summarize_eco(screenshot=None, out_path=None):
         # Fallback was ax + w + 80 (approx ax + 105).
         # Blob 26 is at x=127. Anchor at x=16. Diff = 110.
         # So we search [ax + 80, ax + 180]
-        sep_search_left = ax + 80
+        # Scaled for 4K
+        # Fix: 'w' is already scaled if scale_factor > 1.5, so don't multiply again!
+        icon_w_scaled = w 
+        
+        search_start_offset = int(80 * scale_factor)
+        search_width = int(100 * scale_factor)
+        
+        sep_search_left = ax + search_start_offset
         sep_search_top = ay - 10 
-        sep_search_w = 100
-        sep_search_h = h + 20
+        sep_search_w = search_width * 2 
+        # Fix: 'h' is already scaled, so don't multiply it again. Only scale the padding.
+        sep_search_h = h + int(20 * scale_factor)
         # ... (Bounds clamping)
         sh, sw = ss_gray.shape
         sep_search_left = max(0, min(sw - 1, sep_search_left))
@@ -846,27 +1016,30 @@ def summarize_eco(screenshot=None, out_path=None):
         if separator_found:
              sep_abs_x = sep_search_left + sep_x_rel
              
-             res_roi_left = ax + w - 5
-             res_roi_right = sep_abs_x - 2 
+             res_roi_left = ax + icon_w_scaled - 5 # -5 is small padding, maybe scale it? let's keep it small.
+             if scale_factor > 1.5:
+                res_roi_left = ax + icon_w_scaled + 8 # Shift right more for 4K to avoid icon bleed
+             
+             res_roi_right = sep_abs_x - 5 # Increase padding from separator
              res_roi_top = ay - fudge_factor
              res_roi_bottom = ay + h + fudge_factor
-            # Villager ROI: Starts after separator
-             vill_roi_left = sep_abs_x + sep_w_found + 10 # Reduced Padding to ensure we catch the '0' at x=156
-             vill_roi_right = vill_roi_left + 50 # Assume max width
+             # Villager ROI: Starts after separator
+             vill_roi_left = sep_abs_x + sep_w_found + int(4 * scale_factor) # Reduced padding from 20 to 4 to catch '1'
+             vill_roi_right = vill_roi_left + int(60 * scale_factor) # Wider search area
              vill_roi_top = ay - fudge_factor
              vill_roi_bottom = ay + h + fudge_factor
         else:
              # Fallback
-             res_roi_left = ax + w - 5
+             res_roi_left = ax + icon_w_scaled - 5
              res_roi_top = ay - fudge_factor
-             res_roi_w = 75
+             res_roi_w = int(85 * scale_factor) # Widen fallback
              res_roi_h = h + fudge_factor * 2
              res_roi_right = res_roi_left + res_roi_w
              res_roi_bottom = res_roi_top + res_roi_h
              
-             vill_roi_left = ax + w + 80
+             vill_roi_left = ax + icon_w_scaled + int(80 * scale_factor)
              vill_roi_top = ay - fudge_factor
-             vill_roi_w = 50
+             vill_roi_w = int(50 * scale_factor)
              vill_roi_h = h + fudge_factor * 2
              vill_roi_right = vill_roi_left + vill_roi_w
              vill_roi_bottom = vill_roi_top + vill_roi_h
@@ -894,7 +1067,10 @@ def summarize_eco(screenshot=None, out_path=None):
                 res_img = screenshot.crop((res_roi_left, res_roi_top, res_roi_right, res_roi_bottom))
                 val_groups = _parse_number_from_region(res_img, digit_kernels_gray, out_path=out_path, name=f"{name}_res")
                 results[name] = val_groups[0] if val_groups else None
-            except Exception:
+                if not val_groups:
+                    logging.warning(f"Failed to parse resource {name} at ({res_roi_left}, {res_roi_top})")
+            except Exception as e:
+                logging.error(f"Error parsing resource {name}: {e}")
                 results[name] = None
         else:
             results[name] = None
@@ -913,10 +1089,28 @@ def summarize_eco(screenshot=None, out_path=None):
             else:
                 results[f'{name}_vills'] = None
                 
+    # Check if we failed to parse any base resources
+    valid_res_count = 0
+    for res_name, _ in resources:
+        if results.get(res_name) is not None:
+            valid_res_count += 1
+            
+    if _CACHED_ANCHORS and valid_res_count == 0:
+        if not hasattr(summarize_eco, '_consecutive_failures'):
+            summarize_eco._consecutive_failures = 0
+        summarize_eco._consecutive_failures += 1
+        
+        if summarize_eco._consecutive_failures >= 3:
+            logging.warning("Failed to parse resources for 3 frames. Resetting anchors.")
+            _CACHED_ANCHORS = None
+            summarize_eco._last_anchor_attempt = 0
+            summarize_eco._consecutive_failures = 0
+    else:
+        summarize_eco._consecutive_failures = 0
+
     if out_path:
         cv2.imwrite(os.path.join(out_path, "debug_separator_viz.png"), debug_viz)
 
-    return results
     return results
 
 
