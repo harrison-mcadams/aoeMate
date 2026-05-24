@@ -36,6 +36,27 @@ def get_bbox(behavior):
     else:
         raise ValueError(f"Unrecognized behavior: {behavior}")
 
+_CURRENT_MONITOR_INDEX = None
+
+def set_monitor_index(idx: int):
+    """Programmatically override/set the active monitor index."""
+    global _CURRENT_MONITOR_INDEX
+    _CURRENT_MONITOR_INDEX = idx
+
+def get_monitor_index() -> int:
+    """Get the active monitor index, respecting AOE_MONITOR_INDEX env var first."""
+    global _CURRENT_MONITOR_INDEX
+    if 'AOE_MONITOR_INDEX' in os.environ:
+        val = os.environ['AOE_MONITOR_INDEX']
+        if val.lower() != 'auto':
+            try:
+                return int(val)
+            except ValueError:
+                pass
+    if _CURRENT_MONITOR_INDEX is not None:
+        return _CURRENT_MONITOR_INDEX
+    return 1 # Fallback to 1 (primary monitor)
+
 def capture_gfn_screen_region(bbox, *, out_path: Optional[str] = None):
     """
     Captures a screenshot of a specific region of the screen.
@@ -47,12 +68,7 @@ def capture_gfn_screen_region(bbox, *, out_path: Optional[str] = None):
         PIL.Image: the captured image
     """
     with mss() as sct:
-        # User requested left monitor, which seems to be index 2 based on debug output.
-        # Allow override via AOE_MONITOR_INDEX
-        try:
-             mon_idx = int(os.environ.get('AOE_MONITOR_INDEX', 2))
-        except ValueError:
-             mon_idx = 2
+        mon_idx = get_monitor_index()
         
         if mon_idx >= len(sct.monitors):
             mon_idx = 0 # Fallback

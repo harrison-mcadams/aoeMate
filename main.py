@@ -211,6 +211,87 @@ def _parse_number_from_region(image: Image.Image, digit_kernels: dict, out_path:
     return [result_str] if result_str else []
 
 
+def auto_detect_monitor() -> int:
+    """Scan all available monitors and find the one that has the active game UI."""
+    import mss
+    with mss.mss() as sct:
+        num_monitors = len(sct.monitors)
+        logging.info(f"Auto-detecting game monitor among {num_monitors} monitors...")
+        
+        # We need to ensure templates/kernels are loaded
+        resources = [
+            ('food', 'food.png'),
+            ('wood', 'wood.png'),
+            ('gold', 'gold.png'),
+            ('stone', 'stone.png'),
+        ]
+        _init_kernels_and_executors(resources)
+        
+        best_monitor = None
+        best_score = 0.0
+        
+        # Skip monitor 0 (virtual combined desktop)
+        for idx in range(1, num_monitors):
+            try:
+                # Temporarily set monitor index in get_ss
+                get_ss.set_monitor_index(idx)
+                
+                # Capture and search anchors
+                bbox = get_ss.get_bbox('eco_summary')
+                img = get_ss.capture_gfn_screen_region(bbox)
+                
+                scale_factor = 1.0
+                if img.width > 600:
+                    scale_factor = 2.0
+                
+                ss_gray = np.array(img.convert('L'), dtype=np.float32)
+                
+                # Scale kernels for template matching
+                res_kernels_gray = {}
+                for k, v in _RESOURCE_KERNELS_GRAY.items():
+                    if v is not None:
+                        if scale_factor > 1.5:
+                            res_kernels_gray[k] = cv2.resize(v, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST)
+                        else:
+                            res_kernels_gray[k] = v
+                
+                anchors = _find_anchors(ss_gray, res_kernels_gray, scale_factor=scale_factor)
+                if anchors:
+                    # Calculate average correlation score of resolved anchors
+                    total_score = 0.0
+                    num_matched = 0
+                    for name, (ax, ay) in anchors.items():
+                        fname = f"{name}.png"
+                        k_gray = res_kernels_gray.get(fname)
+                        if k_gray is not None:
+                            h, w = k_gray.shape
+                            # Bounds check
+                            if ay + h <= ss_gray.shape[0] and ax + w <= ss_gray.shape[1]:
+                                patch = ss_gray[ay:ay+h, ax:ax+w]
+                                res = cv2.matchTemplate(patch, k_gray, cv2.TM_CCOEFF_NORMED)
+                                total_score += float(res[0, 0])
+                                num_matched += 1
+                                
+                    avg_score = total_score / num_matched if num_matched > 0 else 0.0
+                    logging.info(f"Monitor {idx}: Found {len(anchors)} anchors with average correlation score {avg_score:.4f}")
+                    
+                    # We require an average correlation score of at least 0.65 to filter false positive monitors
+                    if avg_score >= 0.65 and avg_score > best_score:
+                        best_score = avg_score
+                        best_monitor = idx
+            except Exception as e:
+                logging.warning(f"Error scanning monitor {idx}: {e}")
+                
+        if best_monitor is not None:
+            logging.info(f"Auto-detected game on Monitor {best_monitor} with average score {best_score:.4f}")
+            get_ss.set_monitor_index(best_monitor)
+            return best_monitor
+        else:
+            logging.warning("Auto-detection could not find the game on any monitor. Defaulting to Monitor 1.")
+            get_ss.set_monitor_index(1)
+            return 1
+
+
 def _find_anchors(ss_gray, resource_kernels, scale_factor=1.0):
     """Find resource icons in the screenshot with conflict resolution and vertical alignment enforcement."""
     candidates = []
@@ -757,6 +838,10 @@ def are_vills_producing():
 
     logging.info(f"Window Geometry: {win_w}x{win_h} at +{win_x}+{win_y}")
 
+    # Auto-detect monitor if not explicitly set in environment
+    if ('AOE_MONITOR_INDEX' not in os.environ or os.environ.get('AOE_MONITOR_INDEX', '').lower() == 'auto') and get_ss._CURRENT_MONITOR_INDEX is None:
+        auto_detect_monitor()
+
     try:
         while True:
             eco_summary = get_ss.get_bbox('eco_summary')
@@ -914,6 +999,49 @@ def summarize_eco(screenshot=None, out_path=None):
     if should_search:
         summarize_eco._last_anchor_attempt = now
         # logging.info("Searching for anchors...")
+        
+        # Auto-detect monitor on first search if not set explicitly
+        if ('AOE_MONITOR_INDEX' not in os.environ or os.environ.get('AOE_MONITOR_INDEX', '').lower() == 'auto') and get_ss._CURRENT_MONITOR_INDEX is None:
+            old_idx = get_ss.get_monitor_index()
+            detected_idx = auto_detect_monitor()
+            if detected_idx != old_idx:
+                # Recapture and update screenshot & ss_gray using the newly detected monitor
+                eco_summary = get_ss.get_bbox('eco_summary')
+                screenshot = get_ss.capture_gfn_screen_region(eco_summary)
+                ss_gray = np.array(screenshot.convert('L'), dtype=np.float32)
+                
+                # Re-scale kernels for the new scale factor if needed
+                scale_factor = 1.0
+                if screenshot.width > 600:
+                    scale_factor = 2.0
+                    
+                # Setup kernels for this scale factor
+                original_kernels = _DIGIT_KERNELS_GRAY
+                digit_kernels_gray = {}
+                for k, v in original_kernels.items():
+                    if v is not None:
+                        digit_kernels_gray[k] = cv2.resize(v, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST) if scale_factor > 1.5 else v
+                    else:
+                        digit_kernels_gray[k] = None
+
+                original_res_kernels = _RESOURCE_KERNELS_GRAY
+                resource_kernels_gray = {}
+                for k, v in original_res_kernels.items():
+                    if v is not None:
+                        resource_kernels_gray[k] = cv2.resize(v, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST) if scale_factor > 1.5 else v
+                    else:
+                        resource_kernels_gray[k] = None
+
+                sep_name = 'villager_separator.png'
+                if sep_name not in resource_kernels_gray:
+                    k_sep = None
+                    if sep_name in _RESOURCE_KERNELS_GRAY and _RESOURCE_KERNELS_GRAY[sep_name] is not None:
+                        k_sep = _RESOURCE_KERNELS_GRAY[sep_name]
+                    if k_sep is not None:
+                        resource_kernels_gray[sep_name] = cv2.resize(k_sep, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST) if scale_factor > 1.5 else k_sep
+                    else:
+                        resource_kernels_gray[sep_name] = None
+        
         new_anchors = _find_anchors(ss_gray, resource_kernels_gray, scale_factor=scale_factor)
         if new_anchors:
             if new_anchors != _CACHED_ANCHORS:
@@ -1719,6 +1847,10 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
 
         # Convert back to OpenCV (BGR)
         return cv2.cvtColor(np.array(canvas_pil), cv2.COLOR_BGR2RGB)
+
+    # Auto-detect monitor if not explicitly set in environment
+    if ('AOE_MONITOR_INDEX' not in os.environ or os.environ.get('AOE_MONITOR_INDEX', '').lower() == 'auto') and get_ss._CURRENT_MONITOR_INDEX is None:
+        auto_detect_monitor()
 
     try:
         _LIVE_ANIMATION = True
