@@ -211,6 +211,69 @@ def _parse_number_from_region(image: Image.Image, digit_kernels: dict, out_path:
     return [result_str] if result_str else []
 
 
+def _detect_scale_factor(ss_gray) -> float:
+    """Detect scale factor dynamically based on environment or template matching in bottom-left."""
+    env_scale = os.environ.get('AOE_SCALE_FACTOR')
+    if env_scale:
+        try:
+            return float(env_scale)
+        except ValueError:
+            pass
+
+    # Heuristic fallback if screenshot is small
+    if ss_gray.shape[1] <= 600:
+        return 1.0
+
+    # Ensure kernels are loaded
+    resources = [
+        ('food', 'food.png'),
+        ('wood', 'wood.png'),
+        ('gold', 'gold.png'),
+        ('stone', 'stone.png'),
+        ('silver', 'silver.png'),
+    ]
+    _init_kernels_and_executors(resources)
+
+    # Screenshot is large. Try 1.5 and 2.0 to see which fits better.
+    test_resources = [
+        ('food', 'food.png'),
+        ('wood', 'wood.png'),
+        ('silver', 'silver.png'),
+    ]
+    
+    sh, sw = ss_gray.shape
+    best_scale = 2.0
+    best_metric = -1.0
+    
+    for scale in [1.5, 2.0]:
+        candidates = []
+        for name, fname in test_resources:
+            k = _RESOURCE_KERNELS_GRAY.get(fname)
+            if k is None:
+                continue
+            k_scaled = cv2.resize(k, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+            res = cv2.matchTemplate(ss_gray, k_scaled, cv2.TM_CCOEFF_NORMED)
+            
+            # Find peaks in bottom-left resource panel region
+            max_x = int(80 * scale)
+            min_y = sh - int(250 * scale)
+            
+            locs = np.where(res >= 0.40)
+            for pt in zip(*locs[::-1]):
+                x, y = pt[0], pt[1]
+                if x <= max_x and y >= min_y:
+                    candidates.append({'name': name, 'score': res[y, x]})
+                    
+        if candidates:
+            unique_names = set(c['name'] for c in candidates)
+            metric = len(unique_names) * 10.0 + sum(c['score'] for c in candidates)
+            if metric > best_metric:
+                best_metric = metric
+                best_scale = scale
+                
+    return best_scale
+
+
 def auto_detect_monitor() -> int:
     """Scan all available monitors and find the one that has the active game UI."""
     import mss
@@ -240,17 +303,14 @@ def auto_detect_monitor() -> int:
                 bbox = get_ss.get_bbox('eco_summary')
                 img = get_ss.capture_gfn_screen_region(bbox)
                 
-                scale_factor = 1.0
-                if img.width > 600:
-                    scale_factor = 2.0
-                
                 ss_gray = np.array(img.convert('L'), dtype=np.float32)
+                scale_factor = _detect_scale_factor(ss_gray)
                 
                 # Scale kernels for template matching
                 res_kernels_gray = {}
                 for k, v in _RESOURCE_KERNELS_GRAY.items():
                     if v is not None:
-                        if scale_factor > 1.5:
+                        if abs(scale_factor - 1.0) > 0.05:
                             res_kernels_gray[k] = cv2.resize(v, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST)
                         else:
                             res_kernels_gray[k] = v
@@ -296,18 +356,13 @@ def _find_anchors(ss_gray, resource_kernels, scale_factor=1.0):
     """Find resource icons in the screenshot with conflict resolution and vertical alignment enforcement."""
     candidates = []
     
-    # Include silver and alternate templates in the search
+    # Include silver templates in the search
     resources = [
         ('food', 'food.png'),
         ('wood', 'wood.png'),
         ('gold', 'gold.png'),
         ('stone', 'stone.png'),
-        ('silver', 'silver.png'), # Silver only exists in this variant for now
-        
-        # Alternate templates for "Macedonia" / low-quality screenshots
-        ('food', 'food.png'),
-        ('wood', 'wood.png'),
-        ('stone', 'stone.png'),
+        ('silver', 'silver.png'),
     ]
     
     for name, fname in resources:
@@ -321,18 +376,18 @@ def _find_anchors(ss_gray, resource_kernels, scale_factor=1.0):
         
         if found and peaks:
             for x, y, score in peaks:
-                # 0. Spatial Restriction: Only consider left strip where icons live
-                # Valid icons are typicaly at x=14 or x=28 (4K). 
-                # Relaxed x constraint from 100 to 160 (to be safe for 4K).
-                # Relaxed y constraint from 220 to 50 (only skip very top edge).
-                if x > 160 or y < 50:
+                # 0. Spatial Restriction: Only consider left strip where resource icons live
+                max_x = int(80 * scale_factor)
+                min_y = ss_gray.shape[0] - int(250 * scale_factor)
+                if x > max_x or y < min_y:
                     continue
                     
-                # 0. Spatial Prior: Boost score if near expected x=14
-                dist_from_expected = abs(x - 14)
-                if dist_from_expected < 10: # Relaxed from 5 to 10
+                # 0. Spatial Prior: Boost score if near expected x=14 * scale_factor
+                expected_x = int(14 * scale_factor)
+                dist_from_expected = abs(x - expected_x)
+                if dist_from_expected < int(10 * scale_factor):
                     score += 0.2 # Significant boost for being in the right spot
-                elif dist_from_expected < 20: # Relaxed from 10 to 20
+                elif dist_from_expected < int(20 * scale_factor):
                     score += 0.1
                     
                 candidates.append({'name': name, 'score': score, 'x': int(x), 'y': int(y)})
@@ -343,7 +398,7 @@ def _find_anchors(ss_gray, resource_kernels, scale_factor=1.0):
     # 1. Conflict Resolution (Spatial NMS)
     # Keep best match for each location
     unique_candidates = []
-    min_dist = 10 
+    min_dist = int(10 * scale_factor)
     
     for c in candidates:
         is_occupied = False
@@ -363,7 +418,7 @@ def _find_anchors(ss_gray, resource_kernels, scale_factor=1.0):
     if not unique_candidates:
         return {}
         
-    x_tolerance = 3
+    x_tolerance = int(5 * scale_factor)
     columns = [] # List of {'x_sum': ..., 'count': ..., 'candidates': []}
     
     for c in unique_candidates:
@@ -384,7 +439,7 @@ def _find_anchors(ss_gray, resource_kernels, scale_factor=1.0):
             
     # Pick the best column
     # Criteria: 
-    # 1. Is Aligned (abs(x-14) < 15) - Must be in the expected column
+    # 1. Is Aligned (abs(x-14*scale) < 30*scale) - Must be in the expected column
     # 2. Contains 'food' - Food is always present
     # 3. Count - More matches is better
     # 4. Total Score - Tie breaker
@@ -393,7 +448,8 @@ def _find_anchors(ss_gray, resource_kernels, scale_factor=1.0):
         col['total_score'] = sum(cand['score'] for cand in col['candidates'])
         col['has_food'] = any(cand['name'] == 'food' for cand in col['candidates'])
         avg_x = col['x_sum'] / col['count']
-        col['is_aligned'] = abs(avg_x - 14) < 30 # Relaxed from 15 to 30
+        expected_x = 14 * scale_factor
+        col['is_aligned'] = abs(avg_x - expected_x) < (30 * scale_factor)
         
     # Sort: IsAligned DESC, HasFood DESC, Count DESC, TotalScore DESC
     columns.sort(key=lambda col: (col['is_aligned'], col['has_food'], col['count'], col['total_score']), reverse=True)
@@ -456,10 +512,8 @@ def _find_anchors(ss_gray, resource_kernels, scale_factor=1.0):
         if final_candidates:
             max_score = max(c['score'] for c in final_candidates)
             # Threshold: 75% of the max score. 
-            # If we have a perfect match (1.0), we discard anything < 0.75.
-            # If max is 0.8, we discard < 0.6.
             final_candidates = [c for c in final_candidates if c['score'] >= 0.75 * max_score]
-
+ 
         # 4.5. Re-Verification of Spacing after Filtering
         # Removing weak candidates might have created gaps. We must re-check spacing.
         final_candidates.sort(key=lambda c: c['y'])
@@ -475,10 +529,10 @@ def _find_anchors(ss_gray, resource_kernels, scale_factor=1.0):
                 if 'MAX_GAP' not in locals(): MAX_GAP = 55.0 * scale_factor
                 
                 if dist < MAX_GAP:
-                    current_group.append(curr)
+                     current_group.append(curr)
                 else:
-                    groups.append(current_group)
-                    current_group = [curr]
+                     groups.append(current_group)
+                     current_group = [curr]
             groups.append(current_group)
             
             # Pick best group again
@@ -490,11 +544,11 @@ def _find_anchors(ss_gray, resource_kernels, scale_factor=1.0):
                 total_score = sum(c['score'] for c in g)
                 score = (1 if has_food else 0, count, total_score)
                 if score > best_score:
-                    best_score = score
-                    best_group = g
+                     best_score = score
+                     best_group = g
             
             final_candidates = best_group
-
+ 
     # 5. Vertical Ordering Enforcement & Labeling
     # Instead of trusting the template label (which confused Wood with Pop),
     # we use the known vertical order in AOE4 (Pop top-most, then Food, Wood, Gold, Stone).
@@ -509,24 +563,31 @@ def _find_anchors(ss_gray, resource_kernels, scale_factor=1.0):
     # 3. Gold
     # 4. Stone
     # (Optional 5. Olive Oil/Silver)
-
+ 
     anchors = {}
     
-    # If we have 5 candidates, first one is likely Pop, skip it for resources
-    # If we have 4, the first one might be Food or Pop. 
-    # Let's be smart: if the gap between first and second is small (~70px), they are part of the set.
-    # If the first one is significantly above where we expect Food (y < 280?), it might be Pop.
-    
+    # We determine effective_start (0 or 1) by checking which starting index
+    # aligns better with the expected resource order: ['food', 'wood', 'gold', 'stone', 'silver']
     effective_start = 0
-    if len(final_candidates) >= 5:
-        # Most likely has Pop icon at the top
-        effective_start = 1
-    elif len(final_candidates) == 4:
-        # Could be Food-Wood-Gold-Stone OR Pop-Food-Wood-Gold
-        # Check first candidate's Y. Resources usually start lower.
-        if final_candidates[0]['y'] < 280:
-             # Likely Pop icon
-             effective_start = 1
+    if len(final_candidates) > 0:
+        resource_order = ['food', 'wood', 'gold', 'stone', 'silver']
+        
+        matches_0 = 0
+        matches_1 = 0
+        
+        for i in range(len(final_candidates)):
+            cand_name = final_candidates[i]['name']
+            
+            # For start_idx = 0
+            if i < len(resource_order) and cand_name == resource_order[i]:
+                matches_0 += 1
+                
+            # For start_idx = 1
+            if i > 0 and (i - 1) < len(resource_order) and cand_name == resource_order[i - 1]:
+                matches_1 += 1
+                
+        if matches_1 > matches_0 or len(final_candidates) >= 6:
+            effective_start = 1
              
     resource_order = ['food', 'wood', 'gold', 'stone', 'silver']
     for i in range(effective_start, len(final_candidates)):
@@ -896,14 +957,12 @@ def summarize_eco(screenshot=None, out_path=None):
     if screenshot is None:
         screenshot = get_ss.capture_gfn_screen_region(eco_summary)
 
-    # out_path = None  <-- Removed this line as it's now an argument
     # Allow kernel path to be overridden with env var AOE_KERNEL_PATH
     kernelPath = _KERNEL_PATH
 
-    # Detect scale based on image width (400px is standard 1080p capture, >600 implies 4K/2x)
-    scale_factor = 1.0
-    if screenshot.width > 600:
-        scale_factor = 2.0
+    # Detect scale based on environment variable, or auto-detect, or fallback to width-based heuristic
+    ss_gray = np.array(screenshot.convert('L'), dtype=np.float32)
+    scale_factor = _detect_scale_factor(ss_gray)
     
     # logging.info(f"summarize_eco: scale_factor={scale_factor} (width={screenshot.width})")
 
@@ -913,9 +972,6 @@ def summarize_eco(screenshot=None, out_path=None):
         ('gold', 'gold.png'),
         ('stone', 'stone.png'),
         ('silver', 'silver.png'),
-        ('food', 'food.png'),
-        ('wood', 'wood.png'),
-        ('stone', 'stone.png'),
     ]
 
     results = {}
@@ -925,22 +981,17 @@ def summarize_eco(screenshot=None, out_path=None):
     _init_kernels_and_executors(resources)
     resource_kernels_gray = _RESOURCE_KERNELS_GRAY
     digit_kernels_gray = _DIGIT_KERNELS_GRAY
-    
-    ss_gray = np.array(screenshot.convert('L'), dtype=np.float32)
 
-    # Scale digit kernels if 4K
-    if scale_factor > 1.5:
-        # Generate 2x kernels on the fly (cached if possible, but fast enough to resize 10 small imgs)
-        # We append them to the dict with the same keys? No, collisions.
-        # We replace them? If the whole UI is 2x, digits are 2x.
-        # Let's replace them for this call scope (copy dict first)
+    # Scale digit kernels if not 1.0
+    if abs(scale_factor - 1.0) > 0.05:
+        # Generate kernels on the fly
         original_kernels = digit_kernels_gray
         digit_kernels_gray = {}
         for k, v in original_kernels.items():
             if v is not None:
-                # Resize to 2x - Use INTER_NEAREST to preserve sharp edges for pixel art digits
-                v_2x = cv2.resize(v, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST)
-                digit_kernels_gray[k] = v_2x
+                # Resize - Use INTER_NEAREST to preserve sharp edges for pixel art digits
+                v_scaled = cv2.resize(v, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST)
+                digit_kernels_gray[k] = v_scaled
             else:
                 digit_kernels_gray[k] = None
 
@@ -949,30 +1000,26 @@ def summarize_eco(screenshot=None, out_path=None):
         resource_kernels_gray = {}
         for k, v in original_res_kernels.items():
             if v is not None:
-                v_2x = cv2.resize(v, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST)
-                resource_kernels_gray[k] = v_2x
+                v_scaled = cv2.resize(v, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST)
+                resource_kernels_gray[k] = v_scaled
             else:
                 resource_kernels_gray[k] = None
         
-        # Ensure villager_separator is loaded and scaled (it's not in 'resources' list)
+        # Ensure villager_separator is loaded and scaled
         sep_name = 'villager_separator.png'
         if sep_name not in resource_kernels_gray:
-            # Try to get from global cache first
             k_sep = None
             if sep_name in _RESOURCE_KERNELS_GRAY and _RESOURCE_KERNELS_GRAY[sep_name] is not None:
                 k_sep = _RESOURCE_KERNELS_GRAY[sep_name]
             else:
-                # Load from disk on demand
                 try:
                     kpath = os.path.join(_KERNEL_PATH, sep_name)
                     if os.path.exists(kpath):
                          kimg = Image.open(kpath)
                          k_sep = np.array(kimg.convert('L'), dtype=np.float32)
-                         # Optionally cache it back effectively? No need, local is fine.
                 except Exception:
                     pass
             
-            # Scale if found
             if k_sep is not None:
                  k_sep_scaled = cv2.resize(k_sep, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST)
                  resource_kernels_gray[sep_name] = k_sep_scaled
@@ -1009,18 +1056,14 @@ def summarize_eco(screenshot=None, out_path=None):
                 eco_summary = get_ss.get_bbox('eco_summary')
                 screenshot = get_ss.capture_gfn_screen_region(eco_summary)
                 ss_gray = np.array(screenshot.convert('L'), dtype=np.float32)
-                
-                # Re-scale kernels for the new scale factor if needed
-                scale_factor = 1.0
-                if screenshot.width > 600:
-                    scale_factor = 2.0
+                scale_factor = _detect_scale_factor(ss_gray)
                     
                 # Setup kernels for this scale factor
                 original_kernels = _DIGIT_KERNELS_GRAY
                 digit_kernels_gray = {}
                 for k, v in original_kernels.items():
                     if v is not None:
-                        digit_kernels_gray[k] = cv2.resize(v, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST) if scale_factor > 1.5 else v
+                        digit_kernels_gray[k] = cv2.resize(v, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST) if abs(scale_factor - 1.0) > 0.05 else v
                     else:
                         digit_kernels_gray[k] = None
 
@@ -1028,7 +1071,7 @@ def summarize_eco(screenshot=None, out_path=None):
                 resource_kernels_gray = {}
                 for k, v in original_res_kernels.items():
                     if v is not None:
-                        resource_kernels_gray[k] = cv2.resize(v, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST) if scale_factor > 1.5 else v
+                        resource_kernels_gray[k] = cv2.resize(v, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST) if abs(scale_factor - 1.0) > 0.05 else v
                     else:
                         resource_kernels_gray[k] = None
 
@@ -1038,7 +1081,7 @@ def summarize_eco(screenshot=None, out_path=None):
                     if sep_name in _RESOURCE_KERNELS_GRAY and _RESOURCE_KERNELS_GRAY[sep_name] is not None:
                         k_sep = _RESOURCE_KERNELS_GRAY[sep_name]
                     if k_sep is not None:
-                        resource_kernels_gray[sep_name] = cv2.resize(k_sep, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST) if scale_factor > 1.5 else k_sep
+                        resource_kernels_gray[sep_name] = cv2.resize(k_sep, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST) if abs(scale_factor - 1.0) > 0.05 else k_sep
                     else:
                         resource_kernels_gray[sep_name] = None
         
@@ -1266,11 +1309,24 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
     win_h = int(os.environ.get('AOEMATE_WIN_H', str(min(1200, int(sh * 0.9)))))
 
     cv_win_name = 'AOEMatePlot'
+    ui_state = {'muted': False, 'btn_coords': (0, 0, 0, 0)}
+
+    def on_mouse(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            bx1, by1, bx2, by2 = ui_state['btn_coords']
+            if bx1 <= x <= bx2 and by1 <= y <= by2:
+                ui_state['muted'] = not ui_state['muted']
+                logging.info(f"Mute toggled: {ui_state['muted']}")
+                if ui_state['muted']:
+                    alert_sound.stop()
+                update_display()
+
     try:
         cv2.namedWindow(cv_win_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(cv_win_name, win_w, win_h)
-    except Exception:
-        pass
+        cv2.setMouseCallback(cv_win_name, on_mouse)
+    except Exception as e:
+        logging.warning(f"Could not set up window or mouse callback: {e}")
 
     # Load all villager templates for multi-civ support
     vill_kernels = _load_villager_kernels()
@@ -1298,6 +1354,7 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         RATE_TAU = 20.0
 
     start_time = datetime.now()
+    current_vill_status = False
     
     # Pause Logic State
     from datetime import timedelta
@@ -1398,6 +1455,9 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         
         # Pause Overlay Font
         font_pause = ImageFont.truetype(font_path_bold, 60)
+        
+        # Button Font
+        font_btn = ImageFont.truetype(font_path_bold, 14)
     except Exception:
         # Fallback to default if Arial not found
         font_axis = ImageFont.load_default()
@@ -1411,6 +1471,7 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         font_status_val = ImageFont.load_default()
         font_footer = ImageFont.load_default()
         font_pause = ImageFont.load_default()
+        font_btn = ImageFont.load_default()
 
     def render_frame(current_w=None, current_h=None):
         # Use current window dimensions if provided, else default
@@ -1828,6 +1889,38 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
         elapsed = (effective_now - start_time).total_seconds()
         draw.text((10, win_h - 15), f'Elapsed: {int(elapsed)}s', font=font_footer, fill=(50, 50, 50))
 
+        # Draw Mute/Unmute Button
+        btn_w = 200
+        btn_h = 45
+        btn_x = box_left + (box_right - box_left - btn_w) // 2
+        btn_y = box_bottom - btn_h - 40
+        
+        bx1, by1 = btn_x, btn_y
+        bx2, by2 = btn_x + btn_w, btn_y + btn_h
+        ui_state['btn_coords'] = (bx1, by1, bx2, by2)
+        
+        btn_text = "UNMUTE ALARM" if ui_state['muted'] else "MUTE ALARM"
+        if ui_state['muted']:
+            # Muted state: Gray button, white text
+            btn_fill = (100, 110, 120)
+            btn_outline = (60, 70, 80)
+            btn_text_color = (255, 255, 255)
+        else:
+            # Active state: Crimson/Coral Red button, white text, indicating click here to mute
+            btn_fill = (220, 53, 69)
+            btn_outline = (170, 30, 45)
+            btn_text_color = (255, 255, 255)
+            
+        # Draw a nice button background with border
+        draw.rectangle((bx1, by1, bx2, by2), fill=btn_fill, outline=btn_outline, width=2)
+        
+        bbox = draw.textbbox((0, 0), btn_text, font=font_btn)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        tx = bx1 + (btn_w - tw) // 2
+        ty = by1 + (btn_h - th) // 2 - 2
+        draw.text((tx, ty), btn_text, font=font_btn, fill=btn_text_color)
+
         # --- PAUSE OVERLAY ---
         if is_paused:
             # Draw semi-transparent overlay
@@ -1847,6 +1940,22 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
 
         # Convert back to OpenCV (BGR)
         return cv2.cvtColor(np.array(canvas_pil), cv2.COLOR_BGR2RGB)
+
+    def update_display():
+        try:
+            rect = cv2.getWindowImageRect(cv_win_name)
+            if rect and rect[2] > 0 and rect[3] > 0:
+                cur_w, cur_h = rect[2], rect[3]
+            else:
+                cur_w, cur_h = win_w, win_h
+        except Exception:
+            cur_w, cur_h = win_w, win_h
+
+        canvas = render_frame(cur_w, cur_h)
+        try:
+            cv2.imshow(cv_win_name, canvas)
+        except Exception:
+            pass
 
     # Auto-detect monitor if not explicitly set in environment
     if ('AOE_MONITOR_INDEX' not in os.environ or os.environ.get('AOE_MONITOR_INDEX', '').lower() == 'auto') and get_ss._CURRENT_MONITOR_INDEX is None:
@@ -1917,28 +2026,12 @@ def live_monitor_resources(poll_sec: float = 1.0, max_points: int = 300):
                         current_vill_status = False
                         vill_score = 0.0
                     
-                    if not current_vill_status:
+                    if not current_vill_status and not ui_state['muted']:
                         alert_sound.start()
                     else:
                         alert_sound.stop()
                 
-                # Get current window size for responsive layout
-                try:
-                    rect = cv2.getWindowImageRect(cv_win_name)
-                    # rect is (x, y, w, h)
-                    # Note: getWindowImageRect might return -1 if window is closed or not ready
-                    if rect and rect[2] > 0 and rect[3] > 0:
-                        cur_w, cur_h = rect[2], rect[3]
-                    else:
-                        cur_w, cur_h = win_w, win_h
-                except Exception:
-                    cur_w, cur_h = win_w, win_h
-
-                canvas = render_frame(cur_w, cur_h)
-                try:
-                    cv2.imshow(cv_win_name, canvas)
-                except Exception:
-                    pass
+                update_display()
                 k = cv2.waitKey(int(poll_sec * 1000)) & 0xFF
                 if k == ord('q') or k == 27:
                     logging.info('Quit key pressed - exiting live monitor')
